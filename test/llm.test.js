@@ -205,3 +205,25 @@ test('OpenCode 每天探测一次；已失效模型轮换到 Zen 目录里的免
   assert.equal(catalogCalls, 1);
   assert.equal(probeCalls, 1);
 });
+
+test('OpenCode 当前模型探测失败时继续试下一个免费模型', async () => {
+  const e = env();
+  e.OPENCODE_API_KEY = 'oc-test';
+  e.OPENCODE_MODEL = 'deepseek-v4.1-flash-free';
+  const models = ['deepseek-v4.1-flash-free', 'glm-5.3-flash-free'].map((id) => ({
+    id, api: { 'chat-completions': {} }, cost: { text: { input: { price: 0 }, output: { price: 0 } } },
+  }));
+  const attempted = [];
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).endsWith('/models')) return Response.json({ data: models });
+    const model = JSON.parse(init.body).model;
+    attempted.push(model);
+    if (model === 'deepseek-v4.1-flash-free') return new Response('unavailable', { status: 503 });
+    return Response.json({ model, choices: [{ message: { content: 'ok' } }] });
+  };
+
+  const result = await checkOpencodeModel(e);
+  assert.deepEqual(attempted, ['deepseek-v4.1-flash-free', 'glm-5.3-flash-free']);
+  assert.equal(result.status, '正常');
+  assert.equal(result.model, 'glm-5.3-flash-free');
+});
