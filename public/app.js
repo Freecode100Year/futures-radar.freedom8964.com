@@ -1,5 +1,5 @@
 // 期货雷达前端：调用 /api；API 不可用或 ?demo=1 时使用 demo.json
-// 路由（仅用 #名字）：#（品种）· #i-gold（品种详情）· #events（事件）· #e-12（事件详情）· #calibration（模型校准）
+// 路由（仅用 #名字）：#（总览）· #instruments（品种）· #i-gold（品种详情）· #events（事件）· #e-12（事件详情）· #calibration（模型校准）
 const DIMS = {
   military_escalation: '军事升级',
   market_shock: '市场冲击',
@@ -16,7 +16,7 @@ const DIR_ICON = { 上涨: '▲', 下跌: '▼', 波动加剧: '◆', 不确定:
 const EFFECT_CLASS = { 利多: 'up', 利空: 'down', 中性: 'flat' };
 
 const DISCLAIMER = '本站内容由 AI 根据公开新闻和行情数据自动生成，仅供研究参考，可能存在错误或遗漏，不构成任何投资建议。期货交易风险高、杠杆大，据此操作风险自负。';
-const state = { view: 'instruments', sector: null, min: 0, watch: true, selected: null, inst: null, demo: null, instruments: null };
+const state = { view: 'overview', sector: null, min: 0, watch: true, selected: null, inst: null, demo: null, instruments: null };
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const fmt = (iso) => (iso ? new Date(iso).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—');
@@ -66,7 +66,7 @@ async function fetchDetail(id) {
 // ---------- 列表 ----------
 
 function renderChips() {
-  $('#domainChips').innerHTML = [null, ...SECTORS]
+  $('#domainChips').innerHTML = [null, ...SECTORS, ...(state.view === 'events' ? [] : ['自选'])]
     .map((d) => `<button class="chip ${state.sector === d ? 'on' : ''}" data-d="${d ?? ''}">${d ?? '全部品类'}</button>`)
     .join('');
 }
@@ -436,16 +436,17 @@ function miniSpark(vals) {
 async function renderInstrumentList() {
   const list = (state.instruments = await fetchInstruments());
   const el = $('#list');
-  const shown = list.filter((i) => !state.sector || i.sector === state.sector);
+  const watch = getWatch();
+  const shown = list.filter((i) => !state.sector || i.sector === state.sector || (state.sector === '自选' && watch.has(i.key)));
   el.innerHTML = SECTORS.filter((sec) => shown.some((i) => i.sector === sec))
     .map((sec) => `<div class="group">${sec}</div>` + shown.filter((i) => i.sector === sec).map((i) => `
       <article class="irow ${state.inst === i.key ? 'sel' : ''}" data-key="${esc(i.key)}" tabindex="0">
-        <div class="iname"><b>${esc(i.name)}</b><span class="note">${esc(i.contract && i.contract !== 'cont' ? i.contract : i.root)}</span></div>
+        <div class="iname"><b>${star(i.key)}${esc(i.name)}</b><span class="note">${esc(i.contract && i.contract !== 'cont' ? i.contract : i.root)}</span></div>
         ${miniSpark(i.spark)}
         <div class="iprice"><b>${fmtPrice(i.stats?.last)}</b><span class="${cls(i.stats?.chg_1d_pct)}">${sign(i.stats?.chg_1d_pct)}</span></div>
         ${i.brief ? `<p class="ihead">${esc(i.brief.headline)}</p>` : ''}
       </article>`).join(''))
-    .join('') || '<div class="empty">暂无行情数据</div>';
+    .join('') || `<div class="empty">${state.sector === '自选' ? '还没有自选品种，点击 ★ 添加' : '暂无行情数据'}</div>`;
   const first = shown.find((i) => i.brief) || shown[0]; // 优先打开已有 AI 解读的品种
   if (!state.inst && first && window.matchMedia('(min-width: 861px)').matches) location.replace(`#i-${first.key}`);
 }
@@ -470,7 +471,7 @@ function renderInstrument(d) {
   $('#detail').innerHTML = `
   <div class="d-head">
     <div>
-      <h2>${esc(inst.name)} <span class="sub2">${esc(inst.root)} · ${esc(inst.exchange)}</span></h2>
+      <h2>${star(inst.key)}${esc(inst.name)} <span class="sub2">${esc(inst.root)} · ${esc(inst.exchange)}</span></h2>
       <div class="meta"><span class="tag sec">${esc(inst.sector)}</span>
         <span>跟踪合约 ${esc(snap?.contract && snap.contract !== 'cont' ? snap.contract : '连续合约')}</span>
         <span>单位 ${esc(inst.unit)}</span><span>行情更新 ${fmt(snap?.updated_at)}</span></div>
@@ -494,6 +495,8 @@ function renderInstrument(d) {
     </div>
   </div>
 
+  ${instrumentToolsHtml(d)}
+
   ${b ? `<div class="box brief">
     <h4>AI 行情解读 · ${esc(b.day)} <span class="nb">不构成投资建议</span></h4>
     <h3>${esc(b.headline)} <span class="tag">${esc(b.price_action)}</span></h3>
@@ -511,6 +514,8 @@ function renderInstrument(d) {
     <p class="note">由 ${esc(b.model)} 生成于 ${fmt(b.created_at)}。行情数字由系统计算，模型只负责归因。</p>
   </div>` : '<div class="box"><h4>AI 行情解读</h4><p class="note">今天的解读还没生成（每天美盘收盘后生成）。</p></div>'}
 
+  ${instrumentToolsHtml2(d)}
+
   <div class="box"><h4>相关事件（近 14 天）</h4>
     ${events?.length ? `<table><thead><tr><th>事件</th><th>严重性</th><th>对本品种</th><th>逻辑</th></tr></thead><tbody>
       ${events.map((e) => `<tr><td><a href="#e-${e.id}">${esc(e.title)}</a></td><td><span class="lvchip lv-${esc(e.level)}">${Math.round(e.severity)} ${esc(e.level)}</span></td>
@@ -521,6 +526,7 @@ function renderInstrument(d) {
   <p class="disclaimer">${DISCLAIMER}</p>`;
 
   drawPriceChart(snap?.daily || [], inst);
+  drawInstrumentTools(d);
   if (cm) drawCurveChart(snap.curve.points);
 }
 
@@ -583,13 +589,20 @@ function drawCurveChart(points) {
 // =====================================================================
 
 function setView(view) {
+  const changed = state.view !== view;
   state.view = view;
   document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('on', a.dataset.view === view));
   $('#evFilters').hidden = view !== 'events';
+  $('.layout').classList.toggle('full', view === 'overview'); // 总览页不需要左侧列表
+  if (changed) {
+    if (state.sector === '自选' && view === 'events') state.sector = null;
+    renderChips();
+  }
 }
 
 async function renderSide() {
-  if (state.view === 'events') await renderEventList();
+  if (state.view === 'overview') await renderOverview();
+  else if (state.view === 'events') await renderEventList();
   else await renderInstrumentList();
 }
 
@@ -610,6 +623,12 @@ async function route() {
     if (state.selected) select(state.selected);
     return;
   }
+  if (h === '' || h === 'overview') {
+    setView('overview');
+    state.inst = null;
+    state.selected = null;
+    return renderOverview();
+  }
   const prev = state.view;
   setView('instruments');
   state.inst = h.startsWith('i-') ? h.slice(2) : null;
@@ -627,6 +646,16 @@ $('#domainChips').addEventListener('click', (e) => {
   if (state.view === 'events') state.selected = null;
   renderSide();
 });
+// 自选星标（列表、表格、详情页都可点）
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-star]');
+  if (!b) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const on = toggleWatch(b.dataset.star);
+  document.querySelectorAll(`[data-star="${b.dataset.star}"]`).forEach((x) => x.classList.toggle('on', on));
+  if (state.sector === '自选') renderSide();
+}, true);
 $('#minSev').addEventListener('input', (e) => {
   state.min = Number(e.target.value);
   $('#minVal').textContent = state.min;

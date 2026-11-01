@@ -2,6 +2,10 @@
 import { INSTRUMENTS, byKey } from './instruments.js';
 import { pickContractSeries } from './market.js';
 import { generate, chainFor } from './llm.js';
+import { performance, technicals, pivots, seasonality, correlationMatrix, SPREADS, spreadStats, notional } from './analytics.js';
+import { cotMetrics, COT_GROUP_LABEL } from './cot.js';
+import { sessionStatus, SESSION_LABEL } from './sessions.js';
+import { upcomingEvents } from './calendar.js';
 
 const DAY = 86400;
 const round = (x, d = 2) => (Number.isFinite(x) ? Math.round(x * 10 ** d) / 10 ** d : null);
@@ -69,17 +73,47 @@ export async function computeSnapshots(env, nowSec = Math.floor(Date.now() / 100
     'SELECT c.instrument, c.payload FROM curves c JOIN (SELECT instrument, MAX(day) AS d FROM curves GROUP BY instrument) m ON c.instrument = m.instrument AND c.day = m.d',
   ).all();
   const curves = Object.fromEntries(curveRows.map((r) => [r.instrument, parse(r.payload)]));
+  // 日线（连续合约，最多约 11 年）与 CFTC 持仓
+  const dailySince = new Date((nowSec - 11 * 366 * DAY) * 1000).toISOString().slice(0, 10);
+  const { results: dRows } = await env.DB.prepare('SELECT instrument, day, open, high, low, close, volume FROM daily_bars WHERE day >= ? ORDER BY day').bind(dailySince).all();
+  const dailyBy = {};
+  for (const r of dRows) (dailyBy[r.instrument] ||= []).push(r);
+  const { results: cRows } = await env.DB.prepare('SELECT instrument, report_date, open_interest, long, short FROM cot ORDER BY report_date').all();
+  const cotBy = {};
+  for (const r of cRows) (cotBy[r.instrument] ||= []).push(r);
 
   const out = [];
+  const ts = new Date(nowSec * 1000).toISOString();
   for (const inst of INSTRUMENTS) {
     const rows = byInst[inst.key] || [];
     const { contract, series } = pickContractSeries(rows, nowSec - 72 * 3600); // 最近 30 天K线最多的合约 ≈ 当前主力
-    const daily = dailyCloses(series).slice(-90);
-    const snap = { contract, stats: computeStats(daily), daily: daily.map((d) => [d.ts, round(d.close, 4)]), curve: curves[inst.key] || null };
+    let daily = dailyCloses(series).slice(-90);
+    const bars = dailyBy[inst.key] || [];
+    // 小时线不足时（例如刚部署）用连续合约日线画图
+    if (daily.length < 20 && bars.length >= 20) daily = bars.slice(-90).map((b) => ({ day: b.day, ts: Date.parse(b.day) / 1000 + 20 * 3600, close: b.close }));
+    const cot = cotMetrics(cotBy[inst.key]);
+    const snap = {
+      contract,
+      stats: computeStats(daily),
+      daily: daily.map((d) => [d.ts, round(d.close, 4)]),
+      curve: curves[inst.key] || null,
+      perf: performance(bars),
+      tech: technicals(bars),
+      pivots: pivots(bars[bars.length - 1]),
+      seasonality: seasonality(bars),
+      cot: cot ? { ...cot, group: COT_GROUP_LABEL[inst.cftc.report] } : null,
+    };
     await env.DB.prepare('INSERT OR REPLACE INTO instrument_snapshot (instrument, updated_at, payload) VALUES (?, ?, ?)')
-      .bind(inst.key, new Date(nowSec * 1000).toISOString(), JSON.stringify(snap)).run();
-    out.push({ instrument: inst.key, contract, days: daily.length });
+      .bind(inst.key, ts, JSON.stringify(snap)).run();
+    out.push({ instrument: inst.key, contract, days: daily.length, daily_bars: bars.length, cot_weeks: cot?.weeks || 0 });
   }
+
+  // 跨品种：60 日相关性矩阵、价差/比价
+  const overview = {
+    correlation: correlationMatrix(dailyBy, INSTRUMENTS.map((i) => i.key), 60),
+    spreads: SPREADS.map((d) => spreadStats(dailyBy, d)).filter(Boolean),
+  };
+  await env.DB.prepare('INSERT OR REPLACE INTO overview_snapshot (id, updated_at, payload) VALUES (1, ?, ?)').bind(ts, JSON.stringify(overview)).run();
   return out;
 }
 
@@ -231,6 +265,9 @@ export async function listInstruments(env) {
       key: i.key, name: i.name, sector: i.sector, unit: i.unit, root: i.root,
       contract: s.contract || null, stats: s.stats || null, spark: (s.daily || []).slice(-30).map((d) => d[1]),
       structure: s.curve?.metrics?.structure || null, roll_yield_ann_pct: s.curve?.metrics?.roll_yield_ann_pct ?? null,
+      perf: s.perf ? { d1: s.perf.d1, w1: s.perf.w1, m1: s.perf.m1, m3: s.perf.m3, ytd: s.perf.ytd, y1: s.perf.y1, pos52: s.perf.pos52 } : null,
+      rsi14: s.tech?.rsi14 ?? null,
+      cot: s.cot ? { net: s.cot.net, net_change: s.cot.net_change, net_pct_oi: s.cot.net_pct_oi, cot_index: s.cot.cot_index, state: s.cot.state, report_date: s.cot.report_date, group: s.cot.group } : null,
       brief: b ? { day: b.day, headline: b.payload.headline, price_action: b.payload.price_action } : null,
       updated_at: s.updated_at || null,
     };
@@ -244,10 +281,36 @@ export async function getInstrument(env, key) {
   const b = await env.DB.prepare('SELECT * FROM market_briefs WHERE instrument = ? ORDER BY day DESC LIMIT 1').bind(key).first();
   const [events, hits] = await Promise.all([relatedEvents(env, key, { days: 14, limit: 20 }), instrumentHitRate(env, key)]);
   return {
-    instrument: { key, name: inst.name, sector: inst.sector, unit: inst.unit, root: inst.root, exchange: inst.exchange },
+    instrument: { key, name: inst.name, sector: inst.sector, unit: inst.unit, root: inst.root, exchange: inst.exchange, months: inst.months, spec: inst.spec, session_hours: SESSION_LABEL[inst.spec.session], cftc_code: inst.cftc.code },
+    session: sessionStatus(inst.spec.session),
     snapshot: row ? { ...parse(row.payload, {}), updated_at: row.updated_at } : null,
     brief: b ? { day: b.day, created_at: b.created_at, model: b.model, ...parse(b.payload, {}) } : null,
     events,
     hit_rate: hits,
+  };
+}
+
+/** 总览页：交易时段、品种表（多周期涨跌/持仓）、价差、相关性、日历、重点事件 */
+export async function getOverview(env, nowMs = Date.now()) {
+  const [instruments, ov, calendar, top] = await Promise.all([
+    listInstruments(env),
+    env.DB.prepare('SELECT updated_at, payload FROM overview_snapshot WHERE id = 1').first(),
+    upcomingEvents(env, { nowMs, days: 7 }),
+    env.DB.prepare(
+      `SELECT id, COALESCE(title_zh, title) AS title, severity, level, sectors, last_updated_at FROM events
+       WHERE status = 'analyzed' AND last_updated_at >= ? ORDER BY severity DESC LIMIT 4`,
+    ).bind(new Date(nowMs - 3 * 86400000).toISOString()).all(),
+  ]);
+  const now = new Date(nowMs);
+  return {
+    sessions: [
+      { label: '能源 · 金属 · 股指 · 国债', ...sessionStatus('globex', now) },
+      { label: '谷物（大豆 · 玉米 · 小麦）', ...sessionStatus('grains', now) },
+    ],
+    instruments: instruments.map((i) => ({ ...i, notional: notional(i.stats?.last, byKey[i.key].spec) })),
+    ...(parse(ov?.payload, {}) || {}),
+    overview_updated_at: ov?.updated_at || null,
+    calendar,
+    top_events: top.results.map((e) => ({ ...e, sectors: parse(e.sectors, []) })),
   };
 }

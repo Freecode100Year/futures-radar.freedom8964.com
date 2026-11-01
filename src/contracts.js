@@ -39,7 +39,9 @@ export function parseYahooBars(json) {
   const q = r.indicators?.quote?.[0] || {};
   const out = [];
   for (let i = 0; i < ts.length; i++) {
-    if (Number.isFinite(q.close?.[i])) out.push({ ts: ts[i], close: q.close[i], volume: Number(q.volume?.[i]) || 0 });
+    if (Number.isFinite(q.close?.[i])) {
+      out.push({ ts: ts[i], close: q.close[i], volume: Number(q.volume?.[i]) || 0, open: q.open?.[i] ?? q.close[i], high: q.high?.[i] ?? q.close[i], low: q.low?.[i] ?? q.close[i] });
+    }
   }
   return out;
 }
@@ -138,4 +140,32 @@ export async function updateCurves(env, { group = null, nowSec = Math.floor(Date
 export async function activeContract(env, key) {
   const s = await env.DB.prepare('SELECT active_contract, active_symbol FROM instrument_state WHERE instrument = ?').bind(key).first();
   return s?.active_contract ? { contract: s.active_contract, symbol: s.active_symbol } : { contract: 'cont', symbol: byKey[key].yahoo };
+}
+
+// ---------------------------------------------------------------------------
+// 日线（连续合约，OHLCV）：用于多周期涨跌、技术指标、季节性、价差。首次拉 10 年，之后每天拉近 1 个月增量。
+// 连续合约在换月时会有价差，对日线级别的指标影响很小；事件反应计算仍然只用单一合约的小时线。
+// ---------------------------------------------------------------------------
+
+/** Yahoo 日线时间戳是交易所当地午夜，加 12 小时后取 UTC 日期即可得到交易日 */
+export const tradingDay = (ts) => new Date((ts + 12 * 3600) * 1000).toISOString().slice(0, 10);
+
+export async function updateDailyBars(env, { group = null, fetcher = fetchYahooBars } = {}) {
+  const list = group === null ? INSTRUMENTS : INSTRUMENTS.filter((_, i) => i % 4 === group);
+  const report = [];
+  for (const inst of list) {
+    try {
+      const n = (await env.DB.prepare('SELECT COUNT(*) AS n FROM daily_bars WHERE instrument = ?').bind(inst.key).first())?.n || 0;
+      const range = n < 500 ? '10y' : '1mo';
+      const bars = await fetcher(inst.yahoo, { interval: '1d', range });
+      const stmt = env.DB.prepare('INSERT OR REPLACE INTO daily_bars (instrument, day, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)');
+      for (let i = 0; i < bars.length; i += 400) {
+        await env.DB.batch(bars.slice(i, i + 400).map((b) => stmt.bind(inst.key, tradingDay(b.ts), b.open, b.high, b.low, b.close, b.volume)));
+      }
+      report.push({ instrument: inst.key, range, bars: bars.length });
+    } catch (e) {
+      report.push({ instrument: inst.key, error: e.message });
+    }
+  }
+  return report;
 }

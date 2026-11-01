@@ -1,7 +1,8 @@
 # Futures Radar · AI 期货市场分析
 
-面向国际期货（能源、金属、农产品、金融期货）的 AI 分析网站，全部运行在 Cloudflare 上。网站有两个视图：
+面向国际期货（能源、金属、农产品、金融期货）的 AI 分析网站，全部运行在 Cloudflare 上。网站有四个视图：
 
+- **总览**（首页）：交易时段、12 个品种的多周期涨跌热力表、价差与比价、资金持仓拥挤度、相关性矩阵、财经日历、重点事件。
 - **品种**：12 个期货品种的主力合约行情、期限结构和每日 AI 行情解读（利多/利空归因）。
 - **事件**：自动采集新闻，把报道归并成事件，分析每个事件对期货的影响（方向、传导链、时间线、严重性），再用主力合约的实际行情校准。
 
@@ -37,6 +38,28 @@ Yahoo 期货合约日线 ─► 期限结构 + 识别主力合约 ─► 主力�
 - 模型只负责归因：给出标题、摘要、走势描述、3–6 条利多/利空因素（标注依据是事件、期限结构、价格行为还是宏观/季节性）、期限结构解读、上下两个方向的风险，以及接下来要关注的数据。
 - 引用的事件编号必须真实存在，否则会被删掉。提示词明确禁止给出买卖、目标价或仓位建议。
 - 行情快照每小时更新一次。前端只读 12 行快照，不直接扫描行情表。
+
+## 行情工具（v0.6）
+
+参考 Barchart、Investing.com、TradingView 等期货网站的常见功能，并入了用免费、可合规展示的数据就能做的部分。调研和取舍见 [`docs/feature-research.md`](docs/feature-research.md)。
+
+| 功能 | 说明 | 代码 |
+|---|---|---|
+| 多周期涨跌 | 1日/1周/1月/3月/6月/年初至今/1年，52 周高低点与区间位置 | `src/analytics.js` |
+| 技术指标 | RSI(14)、MACD(12,26,9)、ATR(14)、布林带(20,2)、20/50/200 日均线、20 日历史波动率；只描述状态，不给买卖评级 | 同上 |
+| 枢轴点 | 经典枢轴点 S3–R3（上一交易日高低收） | 同上 |
+| 季节性 | 近 10 年各月平均涨跌、上涨概率；今年走势对比近 5/10 年平均 | 同上 |
+| 相关性矩阵 | 12 个品种近 60 个交易日日收益率 | 同上 |
+| 价差与比价 | 布伦特−WTI、金银比、铜金比、大豆/玉米比价，附 1 年分位与偏离度 | 同上 |
+| 资金持仓（COT） | CFTC 每周持仓报告：商品看管理基金、金融期货看杠杆基金的净持仓、周变化、占持仓比、COT 指数（3 年区间位置）| `src/cot.js` |
+| 财经日历 | EIA 原油/天然气库存、USDA 出口销售/作物生长、贝克休斯钻机数、CFTC 发布时间自动生成；FOMC、WASDE、CPI 等用管理接口添加 | `src/calendar.js` |
+| 合约规格 | 合约规模、最小变动价位与一跳价值、按最新价算的名义价值、交割月份、结算方式 | `src/instruments.js` |
+| 交易时段 | CME Globex 与 CBOT 谷物的开收盘状态和倒计时（美东时间，自动处理夏令时；不含节假日） | `src/sessions.js` |
+| 自选 | 点 ★ 加入自选，总览和品种列表可按“自选”筛选（存在浏览器本地） | `public/tools.js` |
+
+**数据**：
+- 日线来自 Yahoo 连续合约（首次回填 10 年，之后每天增量），存在 `daily_bars` 表，用于上面的指标。连续合约换月时的价差对日线指标影响很小；事件市场反应仍然只用单一合约的小时线计算。
+- CFTC 数据来自其公开 API（`publicreporting.cftc.gov`），属于美国政府公开信息，可以展示和转载（页面已注明来源）。品种和 CFTC 合约代码的对应关系在 `src/instruments.js` 的 `cftc` 字段；如果 `/api/admin/cot` 返回某个品种在 `missing` 里，说明代码需要更正。
 
 ## 设计要点
 
@@ -130,13 +153,22 @@ A="Authorization: Bearer $ADMIN_TOKEN"; W=https://<你的worker>
 curl -X POST $W/api/admin/llm/test -H "$A"        # 逐家测试模型 key 和模型名
 curl -X POST $W/api/admin/init     -H "$A"        # 写入默认信源
 curl -X POST $W/api/admin/curves   -H "$A"        # 识别主力合约、期限结构，回填主力小时线，生成快照
+curl -X POST $W/api/admin/daily    -H "$A"        # 回填 10 年日线（多周期涨跌、技术指标、季节性、价差）
+curl -X POST $W/api/admin/cot      -H "$A"        # 回填约 3 年 CFTC 持仓报告
 curl -X POST $W/api/admin/ingest   -H "$A"        # 采集一次新闻
 curl -X POST $W/api/admin/brief/brent -H "$A"     # 试生成一个品种的 AI 解读（之后每天自动生成）
 ```
 
-**从旧版本升级**：按顺序执行没跑过的迁移脚本（0002 → 0005），命令是 `npx wrangler d1 execute news-radar --remote --file=<文件>`。v0.4 只需跑 `0005_futures.sql`。这个脚本会重建 `prices` 表，并将所有旧行情保留为连续合约 `cont`。之后部署，再执行一次上面的 `/api/admin/curves`。旧事件的资产代码是旧品种表里的，下次重新分析后会更新。
+**从旧版本升级**：按顺序执行没跑过的迁移脚本（0002 → 0005），命令是 `npx wrangler d1 execute news-radar --remote --file=<文件>`。v0.4 跑 `0005_futures.sql` 和 `0006_market_tools.sql`，v0.5 只需跑 `0006_market_tools.sql`（只新增表，不改已有数据）。这个脚本会重建 `prices` 表，并将所有旧行情保留为连续合约 `cont`。之后部署，再执行一次上面的 `/api/admin/curves`。旧事件的资产代码是旧品种表里的，下次重新分析后会更新。
 
-**定时任务（UTC）**：每 15 分钟采集新闻、调度分析，并分 4 组抓主力小时线；每小时校准事件、刷新品种快照；22 点分 4 组更新期限结构；23 点生成 12 个品种的解读；每天 4 点清理旧正文。
+**定时任务（UTC）**：每 15 分钟采集新闻、调度分析，并分 4 组抓主力小时线；每小时校准事件、刷新品种快照和总览数据；22 点分 4 组更新期限结构和日线；23 点生成 12 个品种的解读；周六、周一 1 点拉 CFTC 持仓报告；每天 4 点清理旧正文。
+
+**添加日历事件**（例如 FOMC）：
+```bash
+curl -X POST $W/api/admin/calendar -H "$A" -H "content-type: application/json" \
+  -d '{"ts":"2026-12-09T19:00:00Z","title":"FOMC 利率决议","instruments":["es","nq","zn","gold"],"importance":3}'
+curl -X DELETE $W/api/admin/calendar/<id> -H "$A"   # 删除
+```
 
 **已知不确定点**：Yahoo 单个合约的代码格式（`CLZ26.NYM`、`GCZ26.CMX`、`ZSF27.CBT`、`ESZ26.CME`）是按惯例拼的，这里没法实际请求验证。如果 `/api/admin/curves` 返回“没有找到在交易的合约”，就改 `src/instruments.js` 里对应品种的 `exchange` 字段。在那之前，行情会用连续合约兜底，只是没有期限结构。
 
@@ -146,6 +178,8 @@ curl -X POST $W/api/admin/brief/brent -H "$A"     # 试生成一个品种的 AI 
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| GET | `/api/overview` | 总览：交易时段、品种表（多周期涨跌/RSI/持仓）、价差、相关性、7 天日历、重点事件 |
+| GET | `/api/calendar?days=14` | 财经日历 |
 | GET | `/api/instruments` | 12 个品种的快照：主力合约、最新价、涨跌、近 30 日走势、升贴水、当日解读标题 |
 | GET | `/api/instruments/:key` | 品种详情：90 日日线、期限结构、统计、AI 解读、相关事件、模型命中率 |
 | GET | `/api/events?min=40&sector=能源&watch=0&limit=50` | 事件列表（可按品类筛选） |
@@ -163,6 +197,10 @@ curl -X POST $W/api/admin/brief/brent -H "$A"     # 试生成一个品种的 AI 
 | POST | `/api/admin/curves` | 立即更新全部品种的期限结构/主力合约，并刷新快照 |
 | POST | `/api/admin/snapshots` | 只刷新品种快照 |
 | POST | `/api/admin/brief/:key` | 立即生成某品种的 AI 解读 |
+| POST | `/api/admin/daily` | 拉取日线（首次 10 年）并刷新快照 |
+| POST | `/api/admin/cot?weeks=160` | 拉取 CFTC 持仓报告并刷新快照 |
+| POST | `/api/admin/calendar` | 添加日历事件（JSON：ts、title、instruments、importance、note） |
+| DELETE | `/api/admin/calendar/:id` | 删除日历事件 |
 | GET | `/api/admin/llm` | 模型路由状态：调用链、各家配置、今日用量、冷却 |
 | POST | `/api/admin/llm/test` | 逐家发一个小请求，测试 key 和模型名是否可用 |
 | POST | `/api/admin/analyze/:id` | 强制分析某事件（跳过分诊门槛） |
@@ -183,7 +221,7 @@ admin 接口都需要 `Authorization: Bearer <ADMIN_TOKEN>`。
 npm test
 ```
 
-包括期货合约（合约代码生成、主力识别、期限结构、换月回填、按合约计算反应以避免换月跳空、稳健波动率）、品种快照与 AI 解读（事件引用校验）、模型路由（JSON 提取与清洗、限流降级与冷却、修复重试、每日额度、提示长度限制、预算、自检）、RSS/Atom/GDELT 解析、评分计算、引文核对、市场反应计算（跳变识别、收益率、刻度、融合权重、方向判定、行情解析）的单元测试，以及一个端到端测试（采集 → 聚类 → 分诊 → 分析 → 校准 → API，并覆盖模型分级、超预算后改走免费模型、全部失败交给队列重试、重新分析门槛、行情增量写入和正文清理）。端到端测试用 `node:sqlite` 模拟 D1，Vectorize、Workers AI 和 Claude 也都是模拟的，不需要网络。需要 Node 22.5+。
+包括行情工具（交易时段含夏令时、财经日历时间换算、多周期涨跌、RSI/ATR/指标状态、枢轴点、季节性、相关性、价差、名义价值、CFTC 字段兼容与 COT 指数、日线回填到总览接口、日历管理接口）、期货合约（合约代码生成、主力识别、期限结构、换月回填、按合约计算反应以避免换月跳空、稳健波动率）、品种快照与 AI 解读（事件引用校验）、模型路由（JSON 提取与清洗、限流降级与冷却、修复重试、每日额度、提示长度限制、预算、自检）、RSS/Atom/GDELT 解析、评分计算、引文核对、市场反应计算（跳变识别、收益率、刻度、融合权重、方向判定、行情解析）的单元测试，以及一个端到端测试（采集 → 聚类 → 分诊 → 分析 → 校准 → API，并覆盖模型分级、超预算后改走免费模型、全部失败交给队列重试、重新分析门槛、行情增量写入和正文清理）。端到端测试用 `node:sqlite` 模拟 D1，Vectorize、Workers AI 和 Claude 也都是模拟的，不需要网络。需要 Node 22.5+。
 
 ## 下一步可以加
 
