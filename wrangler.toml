@@ -2,6 +2,11 @@ name = "news-radar"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 account_id = "a97d40bfd3c4912c2a8fcddba028dbce"
+workers_dev = false
+
+[[routes]]
+pattern = "futures-radar.freedom8964.com"
+custom_domain = true
 
 [assets]
 directory = "./public"
