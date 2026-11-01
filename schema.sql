@@ -183,3 +183,9 @@ CREATE TABLE IF NOT EXISTS overview_snapshot (
   updated_at TEXT,
   payload    TEXT
 );
+CREATE TABLE IF NOT EXISTS cron_log (
+  step TEXT PRIMARY KEY,
+  ran_at INTEGER NOT NULL,
+  ok INTEGER NOT NULL,
+  detail TEXT
+);
