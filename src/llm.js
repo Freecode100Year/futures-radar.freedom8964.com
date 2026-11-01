@@ -80,7 +80,31 @@ export function isConfigured(env, id) {
   return !!env[p.keyEnv];
 }
 
-const modelOf = (env, id) => env[PROVIDERS[id].modelEnv] || PROVIDERS[id].model;
+const configuredModelOf = (env, id) => env[PROVIDERS[id].modelEnv] || PROVIDERS[id].model;
+const modelOf = (env, id) => configuredModelOf(env, id);
+async function selectedModelOf(env, id) {
+  if (id !== 'opencode') return configuredModelOf(env, id);
+  const selected = await env.DB.prepare('SELECT model FROM opencode_model_state WHERE provider = ?').bind(id).first();
+  return selected?.model || configuredModelOf(env, id);
+}
+
+const OPENCODE_MODEL_CATALOG = 'https://opencode.ai/zen/v1/models';
+const OPENCODE_MODEL_PREFERENCES = [
+  'deepseek-v4.1-flash-free', 'glm-5.3-flash-free', 'big-pickle', 'beam-free', 'flint-40b-free',
+  'mimo-v2.6-flash-free', 'nemotron-3.5-lightning-free', 'nemotron-3.5-super-vl-free',
+];
+
+export function freeOpencodeModels(models) {
+  const ids = (Array.isArray(models) ? models : [])
+    .filter((m) => m?.api?.['chat-completions'] && m.cost?.text?.input?.price === 0 && m.cost?.text?.output?.price === 0)
+    .map((m) => m.id)
+    .filter((id) => typeof id === 'string' && id.length > 0);
+  const rank = (id) => {
+    const i = OPENCODE_MODEL_PREFERENCES.indexOf(id);
+    return i < 0 ? OPENCODE_MODEL_PREFERENCES.length : i;
+  };
+  return [...new Set(ids)].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+}
 
 // ---------------------------------------------------------------------------
 // JSON：提示词描述、抽取、按 schema 清洗
@@ -185,10 +209,10 @@ async function httpJson(url, init, timeoutMs) {
   return res.json();
 }
 
-async function callOpenAI(env, id, { system, user, schema, maxTokens }) {
+async function callOpenAI(env, id, { system, user, schema, maxTokens, model: modelOverride }) {
   const p = PROVIDERS[id];
   const body = {
-    model: modelOf(env, id),
+    model: modelOverride || configuredModelOf(env, id),
     messages: [{ role: 'system', content: `${system}\n\n${schemaPrompt(schema)}` }, { role: 'user', content: user }],
     max_tokens: maxTokens,
     temperature: 0.2,
@@ -344,6 +368,68 @@ async function record(env, id, model, purpose, usage, ok) {
   }
 }
 
+/** 每日探测 OpenCode Zen 的免费模型；探测成功后把活动模型保存在 D1。 */
+export async function checkOpencodeModel(env) {
+  if (!isConfigured(env, 'opencode')) return { status: '未配置' };
+  const day = today();
+  const stored = await env.DB.prepare('SELECT model, checked_day, status FROM opencode_model_state WHERE provider = ?').bind('opencode').first();
+  if (stored?.checked_day === day) return { status: '今日已检查', model: stored.model };
+
+  const initialModel = stored?.model || configuredModelOf(env, 'opencode');
+  await env.DB.prepare(
+    `INSERT INTO opencode_model_state (provider, model, checked_day, status, last_error, updated_at)
+     VALUES ('opencode', ?, ?, '检查中', NULL, ?)
+     ON CONFLICT(provider) DO UPDATE SET checked_day = excluded.checked_day, status = excluded.status, last_error = NULL, updated_at = excluded.updated_at`,
+  ).bind(initialModel, day, new Date().toISOString()).run();
+
+  let models = [];
+  let catalogError = null;
+  try {
+    const catalog = await httpJson(OPENCODE_MODEL_CATALOG, { headers: { accept: 'application/json' } }, 15000);
+    models = freeOpencodeModels(catalog.data);
+  } catch (err) {
+    catalogError = err.message;
+  }
+  const availableModels = catalogError ? OPENCODE_MODEL_PREFERENCES : models;
+  const candidates = availableModels.includes(initialModel)
+    ? [initialModel, ...availableModels.filter((id) => id !== initialModel)]
+    : availableModels;
+  if (!candidates.length && !catalogError) catalogError = 'Zen 目录中没有免费 Chat Completions 模型';
+
+  let lastError = catalogError;
+  for (const model of candidates) {
+    try {
+      const data = await httpJson(PROVIDERS.opencode.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${env.OPENCODE_API_KEY}` },
+        body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Reply with OK.' }], max_tokens: 8, temperature: 0 }),
+      }, 20000);
+      const text = data.choices?.[0]?.message?.content;
+      if (typeof text !== 'string' || !text.trim()) throw new ProviderError('模型未返回文本', { status: 502 });
+      await record(env, 'opencode', data.model || model, 'healthcheck', {
+        input: data.usage?.prompt_tokens ?? 0, output: data.usage?.completion_tokens ?? 0,
+      }, true);
+      await env.DB.prepare(
+        `UPDATE opencode_model_state SET model = ?, status = '正常', last_error = NULL, updated_at = ? WHERE provider = 'opencode'`,
+      ).bind(data.model || model, new Date().toISOString()).run();
+      return { status: '正常', model: data.model || model };
+    } catch (err) {
+      lastError = err.message;
+      await record(env, 'opencode', model, 'healthcheck', { input: 0, output: 0 }, false);
+    }
+  }
+
+  const error = lastError || 'OpenCode 没有可用的免费模型';
+  if (candidates.length) {
+    const cooldown = cooldownFor({ status: Number(error.match(/HTTP (\d+)/)?.[1] || 0) });
+    if (cooldown) await setCooldown(env, 'opencode', cooldown, error);
+  }
+  await env.DB.prepare(
+    `UPDATE opencode_model_state SET model = ?, status = '失败', last_error = ?, updated_at = ? WHERE provider = 'opencode'`,
+  ).bind(initialModel, String(error).slice(0, 300), new Date().toISOString()).run();
+  return { status: '失败', model: initialModel, error: String(error).slice(0, 300) };
+}
+
 export async function spentToday(env) {
   const r = await env.DB.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS c FROM api_usage WHERE day = ?').bind(today()).first();
   return r?.c || 0;
@@ -370,14 +456,15 @@ export async function generate(env, { chain, purpose, system, user, schema, maxT
       continue;
     }
     const p = PROVIDERS[id];
+    const selectedModel = await selectedModelOf(env, id);
     let userMsg = user;
     const tries = p.kind === 'anthropic' || p.noRepair ? 1 : 2; // 第二次把校验错误发回去让模型修正
     for (let t = 0; t < tries; t++) {
       let res;
       try {
-        res = await CALLERS[p.kind](env, id, { system, user: userMsg, schema, maxTokens, toolName });
+        res = await CALLERS[p.kind](env, id, { system, user: userMsg, schema, maxTokens, toolName, model: selectedModel });
       } catch (err) {
-        await record(env, id, modelOf(env, id), purpose, { input: 0, output: 0 }, false);
+        await record(env, id, selectedModel, purpose, { input: 0, output: 0 }, false);
         const cd = cooldownFor(err);
         if (cd) await setCooldown(env, id, cd, err.message);
         attempts.push({ provider: id, error: err.message, cooldown_s: cd });
@@ -414,12 +501,13 @@ export async function selfTest(env) {
       continue;
     }
     const t0 = Date.now();
+    const model = await selectedModelOf(env, id);
     try {
-      const r = await CALLERS[PROVIDERS[id].kind](env, id, { system: '你是测试助手。', user: '3+4 等于几？把结果填进 answer，ok 填 true。', schema, maxTokens: 200, toolName: 'answer' });
+      const r = await CALLERS[PROVIDERS[id].kind](env, id, { system: '你是测试助手。', user: '3+4 等于几？把结果填进 answer，ok 填 true。', schema, maxTokens: 200, toolName: 'answer', model });
       const v = sanitize(schema, r.data ?? extractJson(r.text), '$', []);
       out.push({ provider: id, label: PROVIDERS[id].label, model: r.model, status: v?.answer === 7 ? '正常' : '能连通但输出不对', ms: Date.now() - t0, sample: v });
     } catch (e) {
-      out.push({ provider: id, label: PROVIDERS[id].label, model: modelOf(env, id), status: '失败', ms: Date.now() - t0, error: e.message });
+      out.push({ provider: id, label: PROVIDERS[id].label, model, status: '失败', ms: Date.now() - t0, error: e.message });
     }
   }
   return out;
@@ -428,16 +516,18 @@ export async function selfTest(env) {
 /** 状态页：调用链、配置情况、今日用量、冷却 */
 export async function status(env) {
   const { results: state } = await env.DB.prepare('SELECT * FROM provider_state').all();
+  const opencodeHealth = await env.DB.prepare('SELECT checked_day, status, last_error FROM opencode_model_state WHERE provider = ?').bind('opencode').first();
   const st = Object.fromEntries(state.map((s) => [s.provider, s]));
   const providers = [];
   for (const id of Object.keys(PROVIDERS)) {
     const u = await usageToday(env, id);
     const caps = capsOf(env, id);
     providers.push({
-      id, label: PROVIDERS[id].label, model: modelOf(env, id), configured: isConfigured(env, id), paid: !!PROVIDERS[id].paid,
+      id, label: PROVIDERS[id].label, model: await selectedModelOf(env, id), configured: isConfigured(env, id), paid: !!PROVIDERS[id].paid,
       today: u, caps: Object.fromEntries(Object.entries(caps).filter(([, v]) => v < Infinity)),
       cooldown_until: st[id]?.cooldown_until > new Date().toISOString() ? st[id].cooldown_until : null,
       last_error: st[id]?.last_error || null,
+      ...(id === 'opencode' ? { model_health: opencodeHealth || null } : {}),
     });
   }
   return {

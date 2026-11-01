@@ -52,7 +52,7 @@ CHAIN_BRIEF = "workersai,glm,ollama,groq,opencode,openrouter"
 WORKERSAI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GLM_MODEL = "glm-4.7-flash"
-OPENCODE_MODEL = "deepseek-v4-flash-free"
+OPENCODE_MODEL = "deepseek-v4.1-flash-free"
 OPENROUTER_MODEL = "openrouter/free"
 # Claude 模型：TRIAGE_MODEL（默认 claude-haiku-5-5）/ ANALYSIS_MODEL（默认 claude-sonnet-5-5）
 OLLAMA_MODEL = "deepseek-v4-flash"

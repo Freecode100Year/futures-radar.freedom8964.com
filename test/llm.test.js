@@ -1,6 +1,6 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractJson, sanitize, generate, chainFor, selfTest, status } from '../src/llm.js';
+import { extractJson, sanitize, generate, chainFor, selfTest, status, freeOpencodeModels, checkOpencodeModel } from '../src/llm.js';
 import { makeEnv } from './mock-env.js';
 
 const schema = {
@@ -173,4 +173,35 @@ test('调用链可用环境变量覆盖；自检与状态', async () => {
   assert.equal(by.opencode, '未配置');
   const s = await status(e);
   assert.equal(s.providers.find((p) => p.id === 'openrouter').caps.requests, 45);
+});
+
+test('OpenCode 每天探测一次；已失效模型轮换到 Zen 目录里的免费 Chat Completions 模型', async () => {
+  const e = env();
+  e.OPENCODE_API_KEY = 'oc-test';
+  e.OPENCODE_MODEL = 'retired-model';
+  const catalog = [
+    { id: 'paid-model', api: { 'chat-completions': {} }, cost: { text: { input: { price: 1 }, output: { price: 1 } } } },
+    { id: 'free-model', api: { 'chat-completions': {} }, cost: { text: { input: { price: 0 }, output: { price: 0 } } } },
+    { id: 'no-chat', cost: { text: { input: { price: 0 }, output: { price: 0 } } } },
+  ];
+  assert.deepEqual(freeOpencodeModels(catalog), ['free-model']);
+  let catalogCalls = 0;
+  let probeCalls = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).endsWith('/models')) { catalogCalls++; return Response.json({ data: catalog }); }
+    probeCalls++;
+    assert.equal(JSON.parse(init.body).model, 'free-model');
+    return Response.json({ model: 'free-model', choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+  };
+
+  const result = await checkOpencodeModel(e);
+  assert.equal(result.status, '正常');
+  assert.equal(result.model, 'free-model');
+  assert.equal(e.DB._db.prepare('SELECT model FROM opencode_model_state').get().model, 'free-model');
+  assert.equal(e.DB._db.prepare("SELECT calls FROM api_usage WHERE model='opencode:free-model'").get().calls, 1);
+
+  const skipped = await checkOpencodeModel(e);
+  assert.equal(skipped.status, '今日已检查');
+  assert.equal(catalogCalls, 1);
+  assert.equal(probeCalls, 1);
 });

@@ -2,7 +2,7 @@ import { ingest, processArticles, scheduleAnalyses, runAnalysis, purgeOld } from
 import { DEFAULT_SOURCES } from './sources.js';
 import { fetchMarket, calibrateEvents, calibrationStats } from './market.js';
 import { INSTRUMENTS } from './instruments.js';
-import { selfTest, status as llmStatus } from './llm.js';
+import { selfTest, status as llmStatus, checkOpencodeModel } from './llm.js';
 import { updateCurves } from './contracts.js';
 import { computeSnapshots, generateBrief, listInstruments, getInstrument } from './futures.js';
 
@@ -156,12 +156,17 @@ export default {
   async scheduled(controller, env, ctx) {
     const t = new Date(controller.scheduledTime || Date.now());
     const group = Math.floor(t.getUTCMinutes() / 15) % 4;
+    const h = t.getUTCHours();
+    let modelHealth = null;
+    if (group === 0 && h === 3) {
+      try { modelHealth = await checkOpencodeModel(env); }
+      catch (err) { modelHealth = { status: '失败', error: err.message }; }
+    }
     const r = await ingest(env);
     const queued = await scheduleAnalyses(env);
     const market = await fetchMarket(env, { group });
     const calibrated = group === 3 ? await calibrateEvents(env) : [];
     if (group === 3) await computeSnapshots(env); // 每小时刷新品种快照
-    const h = t.getUTCHours();
     if (group === 0 && h === 4) await purgeOld(env); // 每天一次
     // 美国期货日盘收盘后：22 点分 4 组更新期限结构（识别主力合约），23 点把 12 个品种的解读放进队列
     if (h === 22) await updateCurves(env, { group });
@@ -171,7 +176,7 @@ export default {
     }
     console.log(JSON.stringify({
       cron: controller.cron, new_articles: r.new_articles, analyses_queued: queued,
-      market_errors: market.filter((m) => m.error), calibrated: calibrated.length,
+      market_errors: market.filter((m) => m.error), calibrated: calibrated.length, model_health: modelHealth,
     }));
   },
 

@@ -109,6 +109,16 @@ CREATE TABLE IF NOT EXISTS provider_state (
   updated_at     TEXT
 );
 
+-- OpenCode Zen 每日模型健康检查与免费模型切换状态
+CREATE TABLE IF NOT EXISTS opencode_model_state (
+  provider    TEXT PRIMARY KEY,
+  model       TEXT NOT NULL,
+  checked_day TEXT,
+  status      TEXT,
+  last_error  TEXT,
+  updated_at  TEXT
+);
+
 -- 期货：主力合约、期限结构、品种快照、每日 AI 解读
 CREATE TABLE IF NOT EXISTS instrument_state (
   instrument      TEXT PRIMARY KEY,
