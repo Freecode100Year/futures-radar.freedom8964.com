@@ -126,12 +126,13 @@ async function renderOverview() {
 }
 
 function historyNotice(ov) {
-  const n = ov.history_ready;
   const total = ov.instruments.length;
+  // 总览快照还没算过时 history_ready 为空：按每个品种的数据来源估算，避免横幅漏报
+  const n = ov.history_ready ?? ov.instruments.filter((i) => i.bars_source === 'daily').length;
   const noCot = !ov.instruments.some((i) => i.cot);
-  if ((n === undefined || n >= total) && !noCot) return '';
+  if (n >= total && !noCot) return '';
   const parts = [];
-  if (n !== undefined && n < total) parts.push(`历史日线已就绪 ${n}/${total} 个品种（每 15 分钟自动补 3 个；补齐前，涨跌和技术指标先用近几个月的小时线估算，季节性、价差、相关性暂缺）`);
+  if (n < total) parts.push(`历史日线已就绪 ${n}/${total} 个品种（每 15 分钟自动补 3 个；补齐前，涨跌和技术指标先用近几个月的小时线估算，季节性、价差、相关性暂缺）`);
   if (noCot) parts.push('CFTC 持仓报告尚未拉取（每小时自动重试）');
   return `<div class="notice">⏳ ${parts.join('；')}。详情见 <a href="/api/data-status" target="_blank" rel="noopener">数据状态</a>。</div>`;
 }

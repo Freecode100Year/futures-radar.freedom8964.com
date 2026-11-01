@@ -315,3 +315,34 @@ test('定时任务：某一步失败不影响后续步骤', async () => {
   assert.ok(log.market_errors.length > 0);
   assert.ok(env.DB._db.prepare('SELECT COUNT(*) n FROM instrument_snapshot').get().n === 12, '快照照样刷新');
 });
+
+test('定时任务：每 15 分钟补日线，补到数据立即刷新快照；持仓只在整点组检查', async () => {
+  const env = makeEnv();
+  const urls = [];
+  const now = Date.now();
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    urls.push(u);
+    if (u.includes('interval=1d&range=10y')) {
+      const ts = Array.from({ length: 600 }, (_, k) => Math.floor(now / 1000) - (600 - k) * 86400);
+      return Response.json({ chart: { result: [{ timestamp: ts, indicators: { quote: [{ close: ts.map((_, k) => 100 + k / 10), open: ts.map(() => 100), high: ts.map(() => 101), low: ts.map(() => 99), volume: ts.map(() => 1) }] } }] } });
+    }
+    return new Response('down', { status: 503 });
+  };
+  await worker.scheduled({ cron: 't', scheduledTime: Date.UTC(2026, 10, 2, 15, 0) }, env, {}); // group 0
+  assert.equal(env.DB._db.prepare('SELECT COUNT(DISTINCT instrument) n FROM daily_bars').get().n, 3);
+  assert.equal(env.DB._db.prepare('SELECT COUNT(*) n FROM instrument_snapshot').get().n, 12, '补到数据立即刷新快照');
+  assert.ok(!urls.some((u) => u.includes('publicreporting.cftc.gov')), '非整点组不拉持仓');
+  await worker.scheduled({ cron: 't', scheduledTime: Date.UTC(2026, 10, 2, 15, 45) }, env, {}); // group 3
+  assert.equal(env.DB._db.prepare('SELECT COUNT(DISTINCT instrument) n FROM daily_bars').get().n, 6);
+  assert.ok(urls.some((u) => u.includes('publicreporting.cftc.gov')), '整点组检查持仓');
+});
+
+test('数据状态：返回各定时步骤最近一次结果', async () => {
+  const env = makeEnv();
+  globalThis.fetch = async () => new Response('down', { status: 503 });
+  await worker.scheduled({ cron: 't', scheduledTime: Date.UTC(2026, 10, 2, 15, 45) }, env, {});
+  const st = await (await worker.fetch(new Request('https://x/api/data-status'), env, {})).json();
+  assert.ok(st.cron_steps.ensure_history, '记录了补数据步骤');
+  assert.ok(st.cron_steps.snapshots.ran_at);
+});

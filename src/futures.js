@@ -340,18 +340,22 @@ export async function getOverview(env, nowMs = Date.now()) {
 // ---------------------------------------------------------------------------
 
 /**
- * 日线不足 500 根的品种每次补 3 个（12 个品种约 1 小时补完）；
+ * 日线不足 500 根的品种每次补 3 个（cron 每 15 分钟调用，12 个品种约 1 小时补完）；
  * CFTC 持仓没有数据或最新报告超过 11 天时重新拉取（正常发布周期下最多 10 天）。
  */
-export async function ensureHistory(env, { nowSec = Math.floor(Date.now() / 1000), perRun = 3, fetcher = fetchYahooBars, cotFetcher = fetch } = {}) {
+export async function ensureHistory(env, { nowSec = Math.floor(Date.now() / 1000), perRun = 3, checkCot = true, fetcher = fetchYahooBars, cotFetcher = fetch } = {}) {
   const out = { daily: [], cot: null };
   const { results } = await env.DB.prepare('SELECT instrument, COUNT(*) AS n FROM daily_bars GROUP BY instrument').all();
   const have = Object.fromEntries(results.map((r) => [r.instrument, r.n]));
   const missing = INSTRUMENTS.filter((i) => (have[i.key] || 0) < 500).map((i) => i.key);
   if (missing.length) out.daily = await updateDailyBars(env, { keys: missing.slice(0, perRun), fetcher });
 
-  const last = (await env.DB.prepare('SELECT MAX(report_date) AS d FROM cot').first())?.d;
-  if (!last || Date.parse(last) < (nowSec - 11 * DAY) * 1000) out.cot = await updateCot(env, { fetcher: cotFetcher, nowSec });
+  if (checkCot) {
+    const last = (await env.DB.prepare('SELECT MAX(report_date) AS d FROM cot').first())?.d;
+    if (!last || Date.parse(last) < (nowSec - 11 * DAY) * 1000) out.cot = await updateCot(env, { fetcher: cotFetcher, nowSec });
+  }
+  // 本轮确实写入了数据 → 调用方应立即刷新快照
+  out.changed = out.daily.some((d) => d.bars > 0) || (out.cot || []).some((c) => c.rows > 0);
   return out;
 }
 
@@ -364,13 +368,14 @@ export async function dataStatus(env) {
       return { error: e.message };
     }
   };
-  const [prices, daily, cot, snaps, state, ov] = await Promise.all([
+  const [prices, daily, cot, snaps, state, ov, cron] = await Promise.all([
     q('SELECT instrument, COUNT(*) AS bars, MAX(ts) AS last_ts FROM prices GROUP BY instrument'),
     q('SELECT instrument, COUNT(*) AS bars, MIN(day) AS first_day, MAX(day) AS last_day FROM daily_bars GROUP BY instrument'),
     q('SELECT instrument, COUNT(*) AS weeks, MAX(report_date) AS last_report FROM cot GROUP BY instrument'),
     q('SELECT instrument, updated_at FROM instrument_snapshot'),
     q('SELECT instrument, active_contract, rolled_at FROM instrument_state'),
     q('SELECT updated_at FROM overview_snapshot WHERE id = 1'),
+    q('SELECT step, ran_at, ok, detail FROM cron_log ORDER BY step'),
   ]);
   const by = (rows) => (Array.isArray(rows) ? Object.fromEntries(rows.map((r) => [r.instrument, r])) : {});
   const P = by(prices), Dl = by(daily), C = by(cot), S = by(snaps), St = by(state);
@@ -382,6 +387,14 @@ export async function dataStatus(env) {
     now: new Date().toISOString(),
     table_errors: tableErrors,
     overview_updated_at: Array.isArray(ov) ? ov[0]?.updated_at || null : null,
+    // 各定时步骤最近一次的运行时间、成败和返回内容（含逐个品种的错误）
+    cron_steps: Array.isArray(cron)
+      ? Object.fromEntries(cron.map((r) => {
+        let detail = r.detail;
+        try { detail = JSON.parse(r.detail); } catch {}
+        return [r.step, { ran_at: new Date(r.ran_at * 1000).toISOString(), ok: !!r.ok, detail }];
+      }))
+      : cron,
     instruments: INSTRUMENTS.map((i) => ({
       key: i.key,
       active_contract: St[i.key]?.active_contract || null,

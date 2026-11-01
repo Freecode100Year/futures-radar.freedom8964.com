@@ -185,12 +185,23 @@ export default {
     const h = t.getUTCHours();
     const wd = t.getUTCDay();
     const log = { cron: controller.cron, group, errors: {} };
+    const LOGGED = new Set(['market', 'curves', 'daily', 'cot', 'ensure_history', 'snapshots']);
+    const record = async (name, ok, detail) => {
+      if (!LOGGED.has(name)) return;
+      try {
+        await env.DB.prepare('INSERT OR REPLACE INTO cron_log (step, ran_at, ok, detail) VALUES (?, ?, ?, ?)')
+          .bind(name, Math.floor(Date.now() / 1000), ok ? 1 : 0, JSON.stringify(detail ?? null).slice(0, 4000)).run();
+      } catch {} // 迁移 0008 未执行时不影响主流程
+    };
     const step = async (name, fn) => {
       try {
-        return await fn();
+        const res = await fn();
+        await record(name, true, res);
+        return res;
       } catch (err) {
         log.errors[name] = String(err?.message || err);
         console.error(`cron step ${name}`, err);
+        await record(name, false, log.errors[name]);
         return null;
       }
     };
@@ -210,11 +221,13 @@ export default {
     // CFTC 持仓报告周五美东 15:30 发布：周六、周一 UTC 1 点各拉一次（周一用于补延迟发布）
     if (h === 1 && group === 0 && (wd === 6 || wd === 1)) await step('cot', () => updateCot(env));
 
+    // 每 15 分钟补齐缺失的日线（每次 3 个品种，数据齐全后只是两次计数查询）；持仓报告每小时检查一次
+    log.history = await step('ensure_history', () => ensureHistory(env, { checkCot: group === 3 }));
     if (group === 3) {
       log.calibrated = (await step('calibrate', () => calibrateEvents(env)))?.length;
-      // 自动补齐缺失的日线（每次 3 个品种）和过期的持仓报告，然后刷新快照
-      log.history = await step('ensure_history', () => ensureHistory(env));
       await step('snapshots', () => computeSnapshots(env));
+    } else if (log.history?.changed) {
+      await step('snapshots', () => computeSnapshots(env)); // 补到新数据就立即刷新，不等整点
     }
     if (group === 0 && h === 4) await step('purge', () => purgeOld(env));
     if (h === 23 && group === 0) {
