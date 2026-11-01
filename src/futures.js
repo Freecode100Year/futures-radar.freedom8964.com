@@ -3,7 +3,8 @@ import { INSTRUMENTS, byKey } from './instruments.js';
 import { pickContractSeries } from './market.js';
 import { generate, chainFor } from './llm.js';
 import { performance, technicals, pivots, seasonality, correlationMatrix, SPREADS, spreadStats, notional } from './analytics.js';
-import { cotMetrics, COT_GROUP_LABEL } from './cot.js';
+import { cotMetrics, COT_GROUP_LABEL, updateCot } from './cot.js';
+import { updateDailyBars, fetchYahooBars } from './contracts.js';
 import { sessionStatus, SESSION_LABEL } from './sessions.js';
 import { upcomingEvents } from './calendar.js';
 
@@ -75,22 +76,38 @@ export async function computeSnapshots(env, nowSec = Math.floor(Date.now() / 100
   const curves = Object.fromEntries(curveRows.map((r) => [r.instrument, parse(r.payload)]));
   // 日线（连续合约，最多约 11 年）与 CFTC 持仓
   const dailySince = new Date((nowSec - 11 * 366 * DAY) * 1000).toISOString().slice(0, 10);
-  const { results: dRows } = await env.DB.prepare('SELECT instrument, day, open, high, low, close, volume FROM daily_bars WHERE day >= ? ORDER BY day').bind(dailySince).all();
+  // 这两张表来自 0006 迁移；表不存在或查询失败时照样刷新快照（只是缺少这部分指标），不让整个快照中断
   const dailyBy = {};
-  for (const r of dRows) (dailyBy[r.instrument] ||= []).push(r);
-  const { results: cRows } = await env.DB.prepare('SELECT instrument, report_date, open_interest, long, short FROM cot ORDER BY report_date').all();
   const cotBy = {};
-  for (const r of cRows) (cotBy[r.instrument] ||= []).push(r);
+  try {
+    const { results: dRows } = await env.DB.prepare('SELECT instrument, day, open, high, low, close, volume FROM daily_bars WHERE day >= ? ORDER BY day').bind(dailySince).all();
+    for (const r of dRows) (dailyBy[r.instrument] ||= []).push(r);
+  } catch (e) {
+    console.error('daily_bars', e.message);
+  }
+  try {
+    const { results: cRows } = await env.DB.prepare('SELECT instrument, report_date, open_interest, long, short FROM cot ORDER BY report_date').all();
+    for (const r of cRows) (cotBy[r.instrument] ||= []).push(r);
+  } catch (e) {
+    console.error('cot', e.message);
+  }
 
   const out = [];
   const ts = new Date(nowSec * 1000).toISOString();
   for (const inst of INSTRUMENTS) {
     const rows = byInst[inst.key] || [];
     const { contract, series } = pickContractSeries(rows, nowSec - 72 * 3600); // 最近 30 天K线最多的合约 ≈ 当前主力
-    let daily = dailyCloses(series).slice(-90);
-    const bars = dailyBy[inst.key] || [];
+    const hourlyDaily = dailyCloses(series);
+    let daily = hourlyDaily.slice(-90);
+    let bars = dailyBy[inst.key] || [];
+    let barsSource = 'daily';
+    // 日线还没回填时，用小时线汇总出的日收盘临时顶上（最多约 4 个月，高低价用收盘价近似）
+    if (bars.length < 30 && hourlyDaily.length >= 5) {
+      bars = hourlyDaily.map((d) => ({ day: d.day, open: d.close, high: d.close, low: d.close, close: d.close, volume: 0 }));
+      barsSource = 'hourly';
+    }
     // 小时线不足时（例如刚部署）用连续合约日线画图
-    if (daily.length < 20 && bars.length >= 20) daily = bars.slice(-90).map((b) => ({ day: b.day, ts: Date.parse(b.day) / 1000 + 20 * 3600, close: b.close }));
+    if (daily.length < 20 && barsSource === 'daily' && bars.length >= 20) daily = bars.slice(-90).map((b) => ({ day: b.day, ts: Date.parse(b.day) / 1000 + 20 * 3600, close: b.close }));
     const cot = cotMetrics(cotBy[inst.key]);
     const snap = {
       contract,
@@ -100,7 +117,8 @@ export async function computeSnapshots(env, nowSec = Math.floor(Date.now() / 100
       perf: performance(bars),
       tech: technicals(bars),
       pivots: pivots(bars[bars.length - 1]),
-      seasonality: seasonality(bars),
+      seasonality: barsSource === 'daily' ? seasonality(bars) : null,
+      bars_source: barsSource, // 'daily' = 10 年日线；'hourly' = 日线回填前的临时数据
       cot: cot ? { ...cot, group: COT_GROUP_LABEL[inst.cftc.report] } : null,
     };
     await env.DB.prepare('INSERT OR REPLACE INTO instrument_snapshot (instrument, updated_at, payload) VALUES (?, ?, ?)')
@@ -112,6 +130,7 @@ export async function computeSnapshots(env, nowSec = Math.floor(Date.now() / 100
   const overview = {
     correlation: correlationMatrix(dailyBy, INSTRUMENTS.map((i) => i.key), 60),
     spreads: SPREADS.map((d) => spreadStats(dailyBy, d)).filter(Boolean),
+    history_ready: INSTRUMENTS.filter((i) => (dailyBy[i.key] || []).length >= 500).length,
   };
   await env.DB.prepare('INSERT OR REPLACE INTO overview_snapshot (id, updated_at, payload) VALUES (1, ?, ?)').bind(ts, JSON.stringify(overview)).run();
   return out;
@@ -267,6 +286,7 @@ export async function listInstruments(env) {
       structure: s.curve?.metrics?.structure || null, roll_yield_ann_pct: s.curve?.metrics?.roll_yield_ann_pct ?? null,
       perf: s.perf ? { d1: s.perf.d1, w1: s.perf.w1, m1: s.perf.m1, m3: s.perf.m3, ytd: s.perf.ytd, y1: s.perf.y1, pos52: s.perf.pos52 } : null,
       rsi14: s.tech?.rsi14 ?? null,
+      bars_source: s.bars_source || null,
       cot: s.cot ? { net: s.cot.net, net_change: s.cot.net_change, net_pct_oi: s.cot.net_pct_oi, cot_index: s.cot.cot_index, state: s.cot.state, report_date: s.cot.report_date, group: s.cot.group } : null,
       brief: b ? { day: b.day, headline: b.payload.headline, price_action: b.payload.price_action } : null,
       updated_at: s.updated_at || null,
@@ -312,5 +332,67 @@ export async function getOverview(env, nowMs = Date.now()) {
     overview_updated_at: ov?.updated_at || null,
     calendar,
     top_events: top.results.map((e) => ({ ...e, sectors: parse(e.sectors, []) })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 自动补齐历史数据（每小时由 cron 调用）：部署后不需要手动执行回填命令
+// ---------------------------------------------------------------------------
+
+/**
+ * 日线不足 500 根的品种每次补 3 个（12 个品种约 1 小时补完）；
+ * CFTC 持仓没有数据或最新报告超过 11 天时重新拉取（正常发布周期下最多 10 天）。
+ */
+export async function ensureHistory(env, { nowSec = Math.floor(Date.now() / 1000), perRun = 3, fetcher = fetchYahooBars, cotFetcher = fetch } = {}) {
+  const out = { daily: [], cot: null };
+  const { results } = await env.DB.prepare('SELECT instrument, COUNT(*) AS n FROM daily_bars GROUP BY instrument').all();
+  const have = Object.fromEntries(results.map((r) => [r.instrument, r.n]));
+  const missing = INSTRUMENTS.filter((i) => (have[i.key] || 0) < 500).map((i) => i.key);
+  if (missing.length) out.daily = await updateDailyBars(env, { keys: missing.slice(0, perRun), fetcher });
+
+  const last = (await env.DB.prepare('SELECT MAX(report_date) AS d FROM cot').first())?.d;
+  if (!last || Date.parse(last) < (nowSec - 11 * DAY) * 1000) out.cot = await updateCot(env, { fetcher: cotFetcher, nowSec });
+  return out;
+}
+
+/** 数据状态（公开接口，用于排查哪一步没有数据） */
+export async function dataStatus(env) {
+  const q = async (sql) => {
+    try {
+      return (await env.DB.prepare(sql).all()).results;
+    } catch (e) {
+      return { error: e.message };
+    }
+  };
+  const [prices, daily, cot, snaps, state, ov] = await Promise.all([
+    q('SELECT instrument, COUNT(*) AS bars, MAX(ts) AS last_ts FROM prices GROUP BY instrument'),
+    q('SELECT instrument, COUNT(*) AS bars, MIN(day) AS first_day, MAX(day) AS last_day FROM daily_bars GROUP BY instrument'),
+    q('SELECT instrument, COUNT(*) AS weeks, MAX(report_date) AS last_report FROM cot GROUP BY instrument'),
+    q('SELECT instrument, updated_at FROM instrument_snapshot'),
+    q('SELECT instrument, active_contract, rolled_at FROM instrument_state'),
+    q('SELECT updated_at FROM overview_snapshot WHERE id = 1'),
+  ]);
+  const by = (rows) => (Array.isArray(rows) ? Object.fromEntries(rows.map((r) => [r.instrument, r])) : {});
+  const P = by(prices), Dl = by(daily), C = by(cot), S = by(snaps), St = by(state);
+  const tableErrors = Object.fromEntries(
+    Object.entries({ prices, daily_bars: daily, cot, instrument_snapshot: snaps, instrument_state: state, overview_snapshot: ov })
+      .filter(([, v]) => v && !Array.isArray(v)).map(([k, v]) => [k, v.error]),
+  );
+  return {
+    now: new Date().toISOString(),
+    table_errors: tableErrors,
+    overview_updated_at: Array.isArray(ov) ? ov[0]?.updated_at || null : null,
+    instruments: INSTRUMENTS.map((i) => ({
+      key: i.key,
+      active_contract: St[i.key]?.active_contract || null,
+      hourly_bars: P[i.key]?.bars || 0,
+      hourly_last: P[i.key]?.last_ts ? new Date(P[i.key].last_ts * 1000).toISOString() : null,
+      daily_bars: Dl[i.key]?.bars || 0,
+      daily_range: Dl[i.key] ? `${Dl[i.key].first_day} ~ ${Dl[i.key].last_day}` : null,
+      cot_weeks: C[i.key]?.weeks || 0,
+      cot_last_report: C[i.key]?.last_report || null,
+      cftc_code: i.cftc.code,
+      snapshot_updated_at: S[i.key]?.updated_at || null,
+    })),
   };
 }

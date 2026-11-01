@@ -153,13 +153,15 @@ A="Authorization: Bearer $ADMIN_TOKEN"; W=https://<你的worker>
 curl -X POST $W/api/admin/llm/test -H "$A"        # 逐家测试模型 key 和模型名
 curl -X POST $W/api/admin/init     -H "$A"        # 写入默认信源
 curl -X POST $W/api/admin/curves   -H "$A"        # 识别主力合约、期限结构，回填主力小时线，生成快照
-curl -X POST $W/api/admin/daily    -H "$A"        # 回填 10 年日线（多周期涨跌、技术指标、季节性、价差）
-curl -X POST $W/api/admin/cot      -H "$A"        # 回填约 3 年 CFTC 持仓报告
+curl -X POST $W/api/admin/daily    -H "$A"        # 可选：立即回填 10 年日线（不跑也会自动补，约 1 小时补齐）
+curl -X POST $W/api/admin/cot      -H "$A"        # 可选：立即回填约 3 年 CFTC 持仓报告（不跑也会每小时自动重试）
 curl -X POST $W/api/admin/ingest   -H "$A"        # 采集一次新闻
 curl -X POST $W/api/admin/brief/brent -H "$A"     # 试生成一个品种的 AI 解读（之后每天自动生成）
 ```
 
 **从旧版本升级**：按顺序执行没跑过的迁移脚本（0002 → 0005），命令是 `npx wrangler d1 execute news-radar --remote --file=<文件>`。v0.4 跑 `0005_futures.sql` 和 `0006_market_tools.sql`，v0.5 只需跑 `0006_market_tools.sql`（只新增表，不改已有数据）。这个脚本会重建 `prices` 表，并将所有旧行情保留为连续合约 `cont`。之后部署，再执行一次上面的 `/api/admin/curves`。旧事件的资产代码是旧品种表里的，下次重新分析后会更新。
+
+**自动补齐与排查**：每小时检查一次，日线不足 500 根的品种每次补 3 个，CFTC 持仓没有数据或超过 11 天没更新就重新拉取，所以部署后不需要手动回填。补齐之前，多周期涨跌和技术指标先用近几个月的小时线估算，页面顶部会显示进度。打开 `/api/data-status` 可以看到每个品种的小时线、日线、持仓报告数量和缺失的表，是排查数据问题的第一站。定时任务的每一步都单独捕获错误，一步失败不会跳过后面的步骤，错误会记在日志的 `errors` 字段里。
 
 **定时任务（UTC）**：每 15 分钟采集新闻、调度分析，并分 4 组抓主力小时线；每小时校准事件、刷新品种快照和总览数据；22 点分 4 组更新期限结构和日线；23 点生成 12 个品种的解读；周六、周一 1 点拉 CFTC 持仓报告；每天 4 点清理旧正文。
 
@@ -180,6 +182,7 @@ curl -X DELETE $W/api/admin/calendar/<id> -H "$A"   # 删除
 |---|---|---|
 | GET | `/api/overview` | 总览：交易时段、品种表（多周期涨跌/RSI/持仓）、价差、相关性、7 天日历、重点事件 |
 | GET | `/api/calendar?days=14` | 财经日历 |
+| GET | `/api/data-status` | 数据状态：每个品种的小时线、日线、持仓报告数量与最新日期，缺失的表 |
 | GET | `/api/instruments` | 12 个品种的快照：主力合约、最新价、涨跌、近 30 日走势、升贴水、当日解读标题 |
 | GET | `/api/instruments/:key` | 品种详情：90 日日线、期限结构、统计、AI 解读、相关事件、模型命中率 |
 | GET | `/api/events?min=40&sector=能源&watch=0&limit=50` | 事件列表（可按品类筛选） |

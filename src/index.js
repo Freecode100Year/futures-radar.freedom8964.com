@@ -4,7 +4,7 @@ import { fetchMarket, calibrateEvents, calibrationStats } from './market.js';
 import { INSTRUMENTS } from './instruments.js';
 import { selfTest, status as llmStatus, checkOpencodeModel } from './llm.js';
 import { updateCurves, updateDailyBars } from './contracts.js';
-import { computeSnapshots, generateBrief, listInstruments, getInstrument, getOverview } from './futures.js';
+import { computeSnapshots, generateBrief, listInstruments, getInstrument, getOverview, ensureHistory, dataStatus } from './futures.js';
 import { updateCot } from './cot.js';
 import { upcomingEvents, addEvent } from './calendar.js';
 
@@ -92,6 +92,7 @@ export default {
       }
 
       if (req.method === 'GET' && path === '/api/overview') return json(await getOverview(env));
+      if (req.method === 'GET' && path === '/api/data-status') return json(await dataStatus(env));
       if (req.method === 'GET' && path === '/api/calendar') {
         const days = Math.min(Math.max(Number(url.searchParams.get('days') || 14), 1), 60);
         return json(await upcomingEvents(env, { days }));
@@ -177,37 +178,50 @@ export default {
   },
 
   // Cron（每 15 分钟）：采集新闻、调度分析、错峰采集行情；每小时一次重新校准市场反应
+  // Cron（每 15 分钟）。每一步单独 try/catch：某一步失败（例如行情源限流）不会让后面的步骤被跳过
   async scheduled(controller, env, ctx) {
     const t = new Date(controller.scheduledTime || Date.now());
     const group = Math.floor(t.getUTCMinutes() / 15) % 4;
     const h = t.getUTCHours();
-    let modelHealth = null;
-    if (group === 0 && h === 3) {
-      try { modelHealth = await checkOpencodeModel(env); }
-      catch (err) { modelHealth = { status: '失败', error: err.message }; }
-    }
-    const r = await ingest(env);
-    const queued = await scheduleAnalyses(env);
-    const market = await fetchMarket(env, { group });
-    const calibrated = group === 3 ? await calibrateEvents(env) : [];
-    if (group === 3) await computeSnapshots(env); // 每小时刷新品种快照
-    if (group === 0 && h === 4) await purgeOld(env); // 每天一次
-    // 美国期货日盘收盘后：22 点分 4 组更新期限结构（识别主力合约），23 点把 12 个品种的解读放进队列
+    const wd = t.getUTCDay();
+    const log = { cron: controller.cron, group, errors: {} };
+    const step = async (name, fn) => {
+      try {
+        return await fn();
+      } catch (err) {
+        log.errors[name] = String(err?.message || err);
+        console.error(`cron step ${name}`, err);
+        return null;
+      }
+    };
+
+    if (group === 0 && h === 3) log.model_health = await step('opencode_health', () => checkOpencodeModel(env));
+    const r = await step('ingest', () => ingest(env));
+    log.new_articles = r?.new_articles;
+    log.analyses_queued = await step('schedule', () => scheduleAnalyses(env));
+    const market = await step('market', () => fetchMarket(env, { group }));
+    log.market_errors = (market || []).filter((m) => m.error);
+
+    // 美国期货日盘收盘后：22 点分 4 组更新期限结构（识别主力合约）和日线增量
     if (h === 22) {
-      await updateCurves(env, { group });
-      await updateDailyBars(env, { group }); // 日线增量（首次 10 年）
+      await step('curves', () => updateCurves(env, { group }));
+      await step('daily', () => updateDailyBars(env, { group }));
     }
     // CFTC 持仓报告周五美东 15:30 发布：周六、周一 UTC 1 点各拉一次（周一用于补延迟发布）
-    const wd = t.getUTCDay();
-    if (h === 1 && group === 0 && (wd === 6 || wd === 1)) await updateCot(env);
-    if (h === 23 && group === 0) {
-      await computeSnapshots(env);
-      await env.QUEUE.sendBatch(INSTRUMENTS.map((i) => ({ body: { type: 'brief', key: i.key } })));
+    if (h === 1 && group === 0 && (wd === 6 || wd === 1)) await step('cot', () => updateCot(env));
+
+    if (group === 3) {
+      log.calibrated = (await step('calibrate', () => calibrateEvents(env)))?.length;
+      // 自动补齐缺失的日线（每次 3 个品种）和过期的持仓报告，然后刷新快照
+      log.history = await step('ensure_history', () => ensureHistory(env));
+      await step('snapshots', () => computeSnapshots(env));
     }
-    console.log(JSON.stringify({
-      cron: controller.cron, new_articles: r.new_articles, analyses_queued: queued,
-      market_errors: market.filter((m) => m.error), calibrated: calibrated.length, model_health: modelHealth,
-    }));
+    if (group === 0 && h === 4) await step('purge', () => purgeOld(env));
+    if (h === 23 && group === 0) {
+      await step('snapshots_brief', () => computeSnapshots(env));
+      await step('brief_queue', () => env.QUEUE.sendBatch(INSTRUMENTS.map((i) => ({ body: { type: 'brief', key: i.key } }))));
+    }
+    console.log(JSON.stringify(log));
   },
 
   // Queue 消费者：文章聚类 / 事件分析

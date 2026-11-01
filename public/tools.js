@@ -78,6 +78,7 @@ async function renderOverview() {
     <h2>市场总览</h2>
     <div class="sessbar">${sessionChip('globex', '能源·金属·股指·国债')}${sessionChip('grains', '谷物')}</div>
     <p class="note">行情为交易所延迟数据（10–30 分钟），不含交易所节假日；仅供研究参考，不构成投资建议。</p>
+    ${historyNotice(ov)}
   </div>
 
   <div class="box"><h4>多周期涨跌 <span class="note">单元格颜色深浅表示涨跌幅度</span></h4>
@@ -93,7 +94,7 @@ async function renderOverview() {
           <td class="r mono">${fmtPrice(i.stats?.last ?? i.perf?.last)}</td>
           ${PERF_COLS.map(([k]) => `<td class="r mono hc" style="${heat(i.perf?.[k], SCALE[k])}">${sign(i.perf?.[k], k === 'd1' ? 2 : 1)}</td>`).join('')}
           <td>${i.perf?.pos52 !== null && i.perf?.pos52 !== undefined ? `<span class="rng" title="52周区间位置 ${i.perf.pos52}%"><b style="left:${i.perf.pos52}%"></b></span>` : '—'}</td>
-          <td class="r mono ${i.rsi14 >= 70 || i.rsi14 <= 30 ? 'warnc' : ''}">${i.rsi14 ?? '—'}</td>
+          <td class="r mono ${i.rsi14 !== null && i.rsi14 !== undefined && (i.rsi14 >= 70 || i.rsi14 <= 30) ? 'warnc' : ''}">${i.rsi14 ?? '—'}</td>
           <td>${i.cot ? `<span class="cotchip" title="${esc(i.cot.group)} · COT 指数 ${i.cot.cot_index} · ${esc(i.cot.state)}">${cotBar(i.cot.cot_index)}</span>` : '<span class="note">—</span>'}</td>
         </tr>`).join('');
       }).join('')}</tbody>
@@ -122,6 +123,17 @@ async function renderOverview() {
     </div>
   </div>
   <p class="disclaimer">${DISCLAIMER}</p>`;
+}
+
+function historyNotice(ov) {
+  const n = ov.history_ready;
+  const total = ov.instruments.length;
+  const noCot = !ov.instruments.some((i) => i.cot);
+  if ((n === undefined || n >= total) && !noCot) return '';
+  const parts = [];
+  if (n !== undefined && n < total) parts.push(`历史日线已就绪 ${n}/${total} 个品种（每 15 分钟自动补 3 个；补齐前，涨跌和技术指标先用近几个月的小时线估算，季节性、价差、相关性暂缺）`);
+  if (noCot) parts.push('CFTC 持仓报告尚未拉取（每小时自动重试）');
+  return `<div class="notice">⏳ ${parts.join('；')}。详情见 <a href="/api/data-status" target="_blank" rel="noopener">数据状态</a>。</div>`;
 }
 
 const cotBar = (v) => `<span class="cbar"><b style="width:${v}%;background:${v >= 90 ? 'var(--up)' : v <= 10 ? 'var(--down)' : 'var(--accent)'}"></b></span><span class="mono">${v}</span>`;
@@ -193,7 +205,7 @@ function specBox(inst, snap, session) {
 function perfBox(snap) {
   const p = snap?.perf;
   if (!p) return '';
-  return `<div class="box"><h4>多周期表现 <span class="note">连续合约日线</span></h4>
+  return `<div class="box"><h4>多周期表现 <span class="note">${snap.bars_source === 'hourly' ? '日线回填中，暂用小时线估算' : '连续合约日线'}</span></h4>
     <div class="pgrid">${[['w1', '1周'], ['m1', '1月'], ['m3', '3月'], ['m6', '6月'], ['ytd', '年初至今'], ['y1', '1年']].map(([k, l]) => `<div class="pc" style="${heat(p[k], SCALE[k] || 20)}"><span>${l}</span><b class="mono">${sign(p[k], 1)}</b></div>`).join('')}</div>
     <div class="r52"><span class="mono">${fmtPrice(p.lo52)}</span><span class="rng wide"><b style="left:${p.pos52 ?? 50}%"></b></span><span class="mono">${fmtPrice(p.hi52)}</span></div>
     <p class="note">52 周区间位置 ${p.pos52 ?? '—'}% · 距 52 周高点 ${sign(p.from_hi52, 1)}</p></div>`;
@@ -204,7 +216,7 @@ function techBox(snap) {
   if (!t) return '';
   const pv = snap.pivots;
   const row = (k, v, note = '') => `<tr><th>${k}</th><td class="mono">${v ?? '—'}</td><td class="note">${note}</td></tr>`;
-  return `<div class="box"><h4>技术指标 <span class="note">日线 · 只描述状态，不构成买卖信号</span></h4>
+  return `<div class="box"><h4>技术指标 <span class="note">${snap.bars_source === 'hourly' ? '日线回填中，暂用小时线估算（高低价以收盘价近似）' : '日线'} · 只描述状态，不构成买卖信号</span></h4>
     <table class="kv">
       ${row('RSI(14)', t.rsi14, t.rsi14 >= 70 ? '超买区域' : t.rsi14 <= 30 ? '超卖区域' : '中性区域')}
       ${row('MACD(12,26,9)', `${t.macd} / ${t.macd_signal}`, `柱 ${t.macd_hist > 0 ? '+' : ''}${t.macd_hist}`)}
@@ -222,7 +234,7 @@ function techBox(snap) {
 
 function seasonBox(snap) {
   const s = snap?.seasonality;
-  if (!s) return '<div class="box"><h4>季节性</h4><p class="note">需要至少一年的日线数据。</p></div>';
+  if (!s) return `<div class="box"><h4>季节性</h4><p class="note">${snap?.bars_source === 'hourly' ? '历史日线回填中，补齐后自动显示。' : '需要至少一年的日线数据。'}</p></div>`;
   const max = Math.max(...s.monthly.map((m) => Math.abs(m.mean ?? 0)), 0.5);
   return `<div class="box"><h4>季节性 <span class="note">近 ${s.years} 个完整年度 · 连续合约，换月价差可能影响结果</span></h4>
     <div class="grid2 tight">

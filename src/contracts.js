@@ -150,8 +150,8 @@ export async function activeContract(env, key) {
 /** Yahoo 日线时间戳是交易所当地午夜，加 12 小时后取 UTC 日期即可得到交易日 */
 export const tradingDay = (ts) => new Date((ts + 12 * 3600) * 1000).toISOString().slice(0, 10);
 
-export async function updateDailyBars(env, { group = null, fetcher = fetchYahooBars } = {}) {
-  const list = group === null ? INSTRUMENTS : INSTRUMENTS.filter((_, i) => i % 4 === group);
+export async function updateDailyBars(env, { group = null, keys = null, fetcher = fetchYahooBars } = {}) {
+  const list = keys ? INSTRUMENTS.filter((i) => keys.includes(i.key)) : group === null ? INSTRUMENTS : INSTRUMENTS.filter((_, i) => i % 4 === group);
   const report = [];
   for (const inst of list) {
     try {

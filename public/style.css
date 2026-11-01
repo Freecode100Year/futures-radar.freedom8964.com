@@ -290,3 +290,4 @@ table.piv td.pp { color: var(--text); font-weight: 700; }
 .star.on { color: var(--l2); }
 .star:hover { color: var(--l2); }
 .d-head h2 .star { font-size: 18px; }
+.notice { margin-top: 10px; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--l2) 45%, var(--line)); border-radius: 6px; font-size: 13px; color: #e8d3a8; background: color-mix(in srgb, var(--l2) 8%, transparent); }

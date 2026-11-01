@@ -233,3 +233,85 @@ test('日线回填 → 快照 → 总览 / 品种详情 / 日历接口', async (
   assert.ok(!cal.some((e) => e.title === 'FOMC 利率决议'));
   assert.equal((await worker.fetch(new Request(`https://x/api/admin/calendar/1`, { method: 'DELETE' }), env, {})).status, 401);
 });
+
+test('自动补齐：每次补 3 个品种的日线；持仓过期才拉；日线回填前用小时线估算', async () => {
+  const { ensureHistory, dataStatus } = await import('../src/futures.js');
+  const { synthSeries } = await import('./mock-env.js');
+  const env = makeEnv();
+  const now = Math.floor(Date.now() / 1000);
+  // 只有小时线（例如刚部署）：快照里涨跌和 RSI 应该用小时线估算出来，季节性为空
+  const pts = synthSeries({ start: now - 100 * 86400, end: now, base: 80, seed: 3 });
+  const st = env.DB._db.prepare("INSERT INTO prices VALUES ('brent', 'BZF27', ?, ?)");
+  for (const p of pts) st.run(p.ts, p.close);
+  await computeSnapshots(env, now);
+  let ov = await (await worker.fetch(new Request('https://x/api/overview'), env, {})).json();
+  const brent = ov.instruments.find((i) => i.key === 'brent');
+  assert.equal(brent.bars_source, 'hourly');
+  assert.ok(Number.isFinite(brent.perf.w1) && Number.isFinite(brent.rsi14), '小时线估算出 1 周涨跌和 RSI');
+  assert.equal(ov.history_ready, 0);
+  const det = await (await worker.fetch(new Request('https://x/api/instruments/brent'), env, {})).json();
+  assert.equal(det.snapshot.seasonality, null);
+
+  const dailyCalls = [];
+  const fetcher = async (symbol) => {
+    dailyCalls.push(symbol);
+    return Array.from({ length: 600 }, (_, k) => ({ ts: now - (600 - k) * 86400, open: 1, high: 1, low: 1, close: 1 + k / 1000, volume: 1 }));
+  };
+  let cotCalls = 0;
+  const cotFetcher = async () => (cotCalls++, Response.json([]));
+  const r1 = await ensureHistory(env, { nowSec: now, fetcher, cotFetcher });
+  assert.equal(r1.daily.length, 3);
+  assert.equal(cotCalls, 2, '持仓表为空 → 两个数据集各拉一次');
+  for (let i = 0; i < 3; i++) await ensureHistory(env, { nowSec: now, fetcher, cotFetcher });
+  assert.equal(new Set(dailyCalls).size, 12, '4 轮补完 12 个品种');
+  const before = dailyCalls.length;
+  await ensureHistory(env, { nowSec: now, fetcher, cotFetcher });
+  assert.equal(dailyCalls.length, before, '日线已齐不再请求');
+
+  env.DB._db.prepare("INSERT INTO cot VALUES ('gold', ?, 1, 2, 1)").run(new Date((now - 5 * 86400) * 1000).toISOString().slice(0, 10));
+  cotCalls = 0;
+  await ensureHistory(env, { nowSec: now, fetcher, cotFetcher });
+  assert.equal(cotCalls, 0, '最新报告 5 天前 → 不拉');
+
+  await computeSnapshots(env, now);
+  ov = await (await worker.fetch(new Request('https://x/api/overview'), env, {})).json();
+  assert.equal(ov.history_ready, 12);
+  assert.equal(ov.instruments.find((i) => i.key === 'brent').bars_source, 'daily');
+
+  const ds = await (await worker.fetch(new Request('https://x/api/data-status'), env, {})).json();
+  assert.deepEqual(ds.table_errors, {});
+  const b = ds.instruments.find((i) => i.key === 'brent');
+  assert.ok(b.hourly_bars > 1000 && b.daily_bars === 600);
+  assert.equal(ds.instruments.find((i) => i.key === 'gold').cot_weeks, 1);
+});
+
+test('数据状态接口能报告缺失的表；快照在缺表时照样刷新', async () => {
+  const { dataStatus } = await import('../src/futures.js');
+  const env = makeEnv();
+  env.DB._db.exec('DROP TABLE daily_bars; DROP TABLE cot;');
+  const ds = await dataStatus(env);
+  assert.match(ds.table_errors.daily_bars, /no such table/);
+  const rep = await computeSnapshots(env);
+  assert.equal(rep.length, 12, '缺 0006 的表也不会中断快照');
+});
+
+test('定时任务：某一步失败不影响后续步骤', async () => {
+  const env = makeEnv();
+  env.QUEUE.sendBatch = async () => {
+    throw new Error('queue down');
+  };
+  globalThis.fetch = async () => new Response('down', { status: 503 });
+  const logs = [];
+  const orig = console.log;
+  console.log = (x) => logs.push(x);
+  try {
+    // group 3（分钟 45）：行情失败、补齐失败也要继续刷新快照
+    await worker.scheduled({ cron: 't', scheduledTime: Date.UTC(2026, 10, 2, 15, 45) }, env, {});
+  } finally {
+    console.log = orig;
+  }
+  const log = JSON.parse(logs.at(-1));
+  assert.equal(log.group, 3);
+  assert.ok(log.market_errors.length > 0);
+  assert.ok(env.DB._db.prepare('SELECT COUNT(*) n FROM instrument_snapshot').get().n === 12, '快照照样刷新');
+});
