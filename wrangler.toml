@@ -1,0 +1,80 @@
+name = "news-radar"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "news-radar"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "news-radar-articles"
+
+[ai]
+binding = "AI"
+
+[[queues.producers]]
+binding = "QUEUE"
+queue = "news-radar-jobs"
+
+[[queues.consumers]]
+queue = "news-radar-jobs"
+max_batch_size = 10
+max_batch_timeout = 30
+max_retries = 3
+
+[vars]
+EMBED_MODEL = "@cf/baai/bge-m3"          # 多语言，1024 维，中英文混合聚类
+AI_GATEWAY_ID = "default"                # Workers AI 经 AI Gateway 调用，可在控制台查看日志；留空则直连
+WORKERSAI_DAILY_REQUESTS = "100"           # 每天最多 100 次优先走 Qwen；其余模型只作故障/额度回退
+GROQ_DAILY_REQUESTS = "1000"
+OPENROUTER_DAILY_REQUESTS = "45"           # 免费 50 次留 5 次余量
+# 所有任务都先走 Workers AI Qwen 3 30B，再按免费额度回退：
+CHAIN_TRIAGE = "workersai,glm,groq,ollama,opencode,openrouter"
+CHAIN_ANALYSIS = "workersai,glm,ollama,opencode,openrouter"
+CHAIN_ANALYSIS_IMPORTANT = "workersai,glm,ollama,opencode,openrouter"
+CHAIN_BRIEF = "workersai,glm,ollama,groq,opencode,openrouter"
+# 各家模型可单独覆盖：WORKERSAI_MODEL / GROQ_MODEL / GLM_MODEL / OLLAMA_MODEL / OPENCODE_MODEL / OPENROUTER_MODEL
+WORKERSAI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8"
+GROQ_MODEL = "llama-3.3-70b-versatile"
+GLM_MODEL = "glm-4.7-flash"
+OPENCODE_MODEL = "deepseek-v4-flash-free"
+OPENROUTER_MODEL = "openrouter/free"
+# Claude 模型：TRIAGE_MODEL（默认 claude-haiku-5-5）/ ANALYSIS_MODEL（默认 claude-sonnet-5-5）
+OLLAMA_MODEL = "deepseek-v4-flash"
+LLM_TIMEOUT_MS = "90000"
+CLUSTER_THRESHOLD = "0.78"               # 余弦相似度阈值，越高越不容易合并
+CLUSTER_WINDOW_HOURS = "72"
+MAX_ITEMS_PER_FEED = "30"
+MAX_ARTICLE_AGE_HOURS = "72"
+MIN_TRIAGE_SEVERITY = "2"                # 分诊粗分低于此值不做深度分析（省钱）
+DEEP_MODEL_MIN_SEVERITY = "4"            # 粗分 ≥ 此值走 CHAIN_ANALYSIS_IMPORTANT（有 Anthropic key 时先用 Sonnet）
+DAILY_BUDGET_USD = "2"                   # 付费模型（Claude）每日花费上限，达到后路由自动只用免费模型
+MAX_ANALYSES_PER_RUN = "5"               # 每次 cron 最多深度分析几个事件
+ANALYSIS_COOLDOWN_MIN = "30"             # 同一事件两次分析的最短间隔
+REANALYZE_MIN_NEW = "3"                  # 已分析事件新增报道 ≥ max(此值, 30%) 才重新分析
+REANALYZE_MAX_HOURS = "6"                # ……或距上次分析超过此小时数且有新报道
+MAX_SOURCES = "15"                       # 每次深度分析最多带几篇报道
+MAX_SOURCE_CHARS = "2000"                # 每篇报道最多带多少字符正文
+CONTENT_RETENTION_DAYS = "30"            # 超过此天数的文章正文被清除（保留标题、摘要、链接）
+MARKET_PROVIDER = "yahoo"                # yahoo（免key，非官方）| twelvedata（需 TWELVEDATA_API_KEY）；失败时自动切换
+MARKET_PRE_HOURS = "2"                   # 市场反应锚点 = 首篇报道时间往前推 N 小时
+
+# 密钥（不要写在这里，运行 ./scripts/set-secrets.sh 逐个录入）：
+#   ADMIN_TOKEN          管理接口令牌（必需）
+#   ZHIPU_API_KEY        智谱
+#   OLLAMA_API_KEY       Ollama Cloud
+#   GROQ_API_KEY         Groq
+#   OPENCODE_API_KEY     OpenCode Zen
+#   OPENROUTER_API_KEY   OpenRouter
+#   ANTHROPIC_API_KEY    可选，Claude（付费）
+#   TWELVEDATA_API_KEY   可选，行情备用源
+# Workers AI 通过 [ai] 绑定调用，不需要 key。

@@ -1,0 +1,9 @@
+# 本地 wrangler dev 用：复制为 .dev.vars 后填入（.dev.vars 已在 .gitignore 中，切勿提交）
+ADMIN_TOKEN=
+ZHIPU_API_KEY=
+OLLAMA_API_KEY=
+GROQ_API_KEY=
+OPENCODE_API_KEY=
+OPENROUTER_API_KEY=
+ANTHROPIC_API_KEY=
+TWELVEDATA_API_KEY=
