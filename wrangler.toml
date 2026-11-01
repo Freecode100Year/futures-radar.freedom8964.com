@@ -1,6 +1,7 @@
 name = "news-radar"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
+account_id = "a97d40bfd3c4912c2a8fcddba028dbce"
 
 [assets]
 directory = "./public"
@@ -12,7 +13,7 @@ crons = ["*/15 * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "news-radar"
-database_id = "REPLACE_WITH_YOUR_D1_ID"
+database_id = "ed38a33f-376e-4dd9-9e12-5a5a3d389d04"
 
 [[vectorize]]
 binding = "VECTORIZE"

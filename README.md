@@ -134,7 +134,7 @@ curl -X POST $W/api/admin/ingest   -H "$A"        # 采集一次新闻
 curl -X POST $W/api/admin/brief/brent -H "$A"     # 试生成一个品种的 AI 解读（之后每天自动生成）
 ```
 
-**从旧版本升级**：按顺序执行没跑过的迁移脚本（0002 → 0005），命令是 `npx wrangler d1 execute news-radar --remote --file=<文件>`。v0.4 只需跑 `0005_futures.sql`。这个脚本会重建 `prices` 表，保留原油、天然气、黄金、铜的旧数据（记为连续合约），删除不再跟踪的品种。之后部署，再执行一次上面的 `/api/admin/curves`。旧事件的资产代码是旧品种表里的，下次重新分析后会更新。
+**从旧版本升级**：按顺序执行没跑过的迁移脚本（0002 → 0005），命令是 `npx wrangler d1 execute news-radar --remote --file=<文件>`。v0.4 只需跑 `0005_futures.sql`。这个脚本会重建 `prices` 表，并将所有旧行情保留为连续合约 `cont`。之后部署，再执行一次上面的 `/api/admin/curves`。旧事件的资产代码是旧品种表里的，下次重新分析后会更新。
 
 **定时任务（UTC）**：每 15 分钟采集新闻、调度分析，并分 4 组抓主力小时线；每小时校准事件、刷新品种快照；22 点分 4 组更新期限结构；23 点生成 12 个品种的解读；每天 4 点清理旧正文。
 
