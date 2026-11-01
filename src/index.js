@@ -3,8 +3,10 @@ import { DEFAULT_SOURCES } from './sources.js';
 import { fetchMarket, calibrateEvents, calibrationStats } from './market.js';
 import { INSTRUMENTS } from './instruments.js';
 import { selfTest, status as llmStatus } from './llm.js';
-import { updateCurves } from './contracts.js';
-import { computeSnapshots, generateBrief, listInstruments, getInstrument } from './futures.js';
+import { updateCurves, updateDailyBars } from './contracts.js';
+import { computeSnapshots, generateBrief, listInstruments, getInstrument, getOverview } from './futures.js';
+import { updateCot } from './cot.js';
+import { upcomingEvents, addEvent } from './calendar.js';
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -89,6 +91,11 @@ export default {
         return json(results);
       }
 
+      if (req.method === 'GET' && path === '/api/overview') return json(await getOverview(env));
+      if (req.method === 'GET' && path === '/api/calendar') {
+        const days = Math.min(Math.max(Number(url.searchParams.get('days') || 14), 1), 60);
+        return json(await upcomingEvents(env, { days }));
+      }
       if (req.method === 'GET' && path === '/api/instruments') return json(await listInstruments(env));
       const im = path.match(/^\/api\/instruments\/([a-z0-9]+)$/);
       if (req.method === 'GET' && im) {
@@ -118,7 +125,24 @@ export default {
       if (path.startsWith('/api/admin/')) {
         if (!isAdmin(req, env)) return json({ error: 'unauthorized' }, 401);
         if (req.method === 'GET' && path === '/api/admin/llm') return json(await llmStatus(env));
+        const cm = path.match(/^\/api\/admin\/calendar\/(\d+)$/);
+        if (req.method === 'DELETE' && cm) {
+          await env.DB.prepare('DELETE FROM calendar_events WHERE id = ?').bind(Number(cm[1])).run();
+          return json({ ok: true });
+        }
         if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+        if (path === '/api/admin/calendar') {
+          try {
+            return json(await addEvent(env, await req.json()));
+          } catch (e) {
+            return json({ error: e.message }, 400);
+          }
+        }
+        if (path === '/api/admin/daily') return json({ daily: await updateDailyBars(env), snapshots: await computeSnapshots(env) });
+        if (path === '/api/admin/cot') {
+          const weeks = Number(url.searchParams.get('weeks')) || null;
+          return json({ cot: await updateCot(env, { weeks }), snapshots: await computeSnapshots(env) });
+        }
         if (path === '/api/admin/llm/test') return json(await selfTest(env));
 
         if (path === '/api/admin/init') {
@@ -164,7 +188,13 @@ export default {
     const h = t.getUTCHours();
     if (group === 0 && h === 4) await purgeOld(env); // 每天一次
     // 美国期货日盘收盘后：22 点分 4 组更新期限结构（识别主力合约），23 点把 12 个品种的解读放进队列
-    if (h === 22) await updateCurves(env, { group });
+    if (h === 22) {
+      await updateCurves(env, { group });
+      await updateDailyBars(env, { group }); // 日线增量（首次 10 年）
+    }
+    // CFTC 持仓报告周五美东 15:30 发布：周六、周一 UTC 1 点各拉一次（周一用于补延迟发布）
+    const wd = t.getUTCDay();
+    if (h === 1 && group === 0 && (wd === 6 || wd === 1)) await updateCot(env);
     if (h === 23 && group === 0) {
       await computeSnapshots(env);
       await env.QUEUE.sendBatch(INSTRUMENTS.map((i) => ({ body: { type: 'brief', key: i.key } })));
