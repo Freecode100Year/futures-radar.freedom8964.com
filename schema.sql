@@ -211,6 +211,14 @@ CREATE TABLE IF NOT EXISTS hourly_outlook (
   hit68        INTEGER,
   hit95        INTEGER,
   evaluated_at INTEGER,
+  p_up REAL,
+  naive_dir INTEGER,
+  ai_lean TEXT,
+  ai_conf TEXT,
+  dir_actual INTEGER,
+  model_hit INTEGER,
+  ai_hit INTEGER,
+  naive_hit INTEGER,
   PRIMARY KEY (instrument, window_start)
 );
 CREATE INDEX IF NOT EXISTS idx_outlook_pending ON hourly_outlook (evaluated_at, window_start);

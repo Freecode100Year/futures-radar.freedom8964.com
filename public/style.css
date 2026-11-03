@@ -348,3 +348,14 @@ i.dot.na { background: var(--line); }
 .gbanner { position: sticky; top: 0; z-index: 2000; background: color-mix(in srgb, var(--l3) 22%, var(--panel)); border-bottom: 1px solid var(--l3); padding: 8px 20px; font-size: 13px; }
 .gbanner button, .warnbox button { background: transparent; border: 0; color: var(--accent); cursor: pointer; font: inherit; padding: 0; }
 .notice.warnbox { border-color: color-mix(in srgb, var(--l3) 60%, transparent); background: color-mix(in srgb, var(--l3) 12%, transparent); }
+/* v0.9 方向概率 */
+.pbar { display: inline-block; position: relative; width: 70px; height: 8px; border-radius: 4px; background: var(--panel-2); vertical-align: middle; margin-right: 6px; }
+.pbar::after { content: ''; position: absolute; left: 50%; top: -2px; width: 1px; height: 12px; background: var(--muted); }
+.pbar i { position: absolute; top: 0; height: 8px; border-radius: 4px; }
+.pcell { white-space: nowrap; }
+.lean { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 10px; border: 1px solid currentColor; white-space: nowrap; }
+.lean em { font-style: normal; font-size: 10.5px; margin-left: 4px; opacity: 0.75; }
+.lean.flat { color: var(--muted); }
+.dirbox { margin: 10px 0 4px; padding: 10px 12px; border-radius: 6px; background: var(--panel-2); display: grid; gap: 6px; font-size: 13px; }
+.dirbox p { margin: 2px 0 0; }
+table.dirt th { font-weight: 500; color: var(--muted); font-size: 12px; padding: 4px 8px 4px 0; }

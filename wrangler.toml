@@ -49,7 +49,7 @@ CHAIN_TRIAGE = "workersai,glm,groq,ollama,opencode,openrouter,gemini"
 CHAIN_ANALYSIS = "workersai,gemini,glm,ollama,opencode,openrouter"
 CHAIN_ANALYSIS_IMPORTANT = "workersai,gemini,glm,ollama,opencode,openrouter"
 CHAIN_BRIEF = "glm,gemini,ollama,groq,opencode,openrouter,workersai"      # 美东 17:30 生成；Workers AI 额度白天已被分诊用完，放最后
-CHAIN_OUTLOOK = "groq,gemini,glm,ollama,opencode,openrouter,workersai"   # 每小时风险情景（只在有话可说时调用，每天约 6–10 次）
+CHAIN_OUTLOOK = "groq,gemini,glm,ollama,opencode,openrouter,workersai"   # 每小时方向判断与情景（所有开盘品种合并一次请求，每天约 23 次）
 # 各家模型可单独覆盖：WORKERSAI_MODEL / GEMINI_MODEL / GROQ_MODEL / GLM_MODEL / OLLAMA_MODEL / OPENCODE_MODEL / OPENROUTER_MODEL
 WORKERSAI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8"
 GEMINI_MODEL = "gemini-3.1-flash-lite"

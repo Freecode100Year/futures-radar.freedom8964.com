@@ -1,7 +1,7 @@
 // 运行时自检数据库结构：缺表就建、缺列就加。
 // 生产库漏跑迁移（例如 0010 没执行）时，新功能不会整块失效，而是第一次请求时自动补上。
 // 只包含"新增表/列"类的迁移（0006 起）；改写数据的迁移（如 0005 重建 prices）仍需手动执行。
-// 由 migrations/0006–0010 生成，test/schema.test.js 会检查两边是否一致。
+// 由 migrations/0006–0011 生成，test/schema.test.js 会检查两边是否一致。
 
 export const CREATE_STATEMENTS = [
   "CREATE TABLE IF NOT EXISTS daily_bars (\n instrument TEXT NOT NULL,\n day TEXT NOT NULL,\n open REAL, high REAL, low REAL,\n close REAL NOT NULL,\n volume REAL,\n PRIMARY KEY (instrument, day)\n) WITHOUT ROWID",
@@ -23,6 +23,14 @@ export const ADD_COLUMNS = [
   ['prices', 'open', 'REAL'],
   ['prices', 'high', 'REAL'],
   ['prices', 'low', 'REAL'],
+  ['hourly_outlook', 'p_up', 'REAL'],
+  ['hourly_outlook', 'naive_dir', 'INTEGER'],
+  ['hourly_outlook', 'ai_lean', 'TEXT'],
+  ['hourly_outlook', 'ai_conf', 'TEXT'],
+  ['hourly_outlook', 'dir_actual', 'INTEGER'],
+  ['hourly_outlook', 'model_hit', 'INTEGER'],
+  ['hourly_outlook', 'ai_hit', 'INTEGER'],
+  ['hourly_outlook', 'naive_hit', 'INTEGER'],
 ];
 
 let ensured = null; // 每个 Worker 实例只检查一次
@@ -51,6 +59,7 @@ async function runEnsure(env) {
     try {
       await env.DB.prepare(s).run();
       out.created.push(nameOf(s));
+      have.add(nameOf(s)); // 刚建的表也要检查后面的补列
     } catch (e) {
       out.errors.push(`${nameOf(s)}: ${e.message}`);
     }

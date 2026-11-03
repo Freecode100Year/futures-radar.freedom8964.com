@@ -11,6 +11,7 @@ import { cotMetrics, COT_GROUP_LABEL } from '../src/cot.js';
 import { recurringEvents } from '../src/calendar.js';
 import { SESSION_LABEL, isOpen } from '../src/sessions.js';
 import { hourlyCandles, hourStats, computeOutlook, priceTime } from '../src/outlook.js';
+import { predictDirection, actualDirection, NO_CALL } from '../src/predict.js';
 
 const NOW = Math.floor(Date.now() / 1000);
 const H = 3600, D = 86400;
@@ -327,10 +328,10 @@ const calibration = { events: ms.length, direction: { hits, misses, insignifican
 // ---------------- 小时行情与一小时风险展望 ----------------
 // 演示时间若遇休市，就往前找最近一个开盘的整点作为"当前窗口"
 const DEMO_AI = {
-  wti: { context: '[演示] 本小时无数据发布，油价延续早盘区间整理', upside: '若中东航运消息再度紧张，价格可能冲向区间上沿', downside: '若美元走强或风险偏好回落，可能回到区间下沿', watch: '霍尔木兹海峡航运动态' },
-  brent: { context: '[演示] 与 WTI 同步，价差稳定', upside: '欧洲炼厂需求数据好于预期时可能走强', downside: '若 OPEC+ 增产传闻发酵，可能承压', watch: '布伦特-WTI 价差' },
-  gold: { context: '[演示] 美元指数小幅走弱', upside: '若美债收益率继续回落，金价可能向上沿运动', downside: '若美联储官员讲话偏鹰，可能回落', watch: '10 年期美债收益率' },
-  es: { context: '[演示] 美股盘前，科技股财报季', upside: '大型科技股盘前走强时可能带动指数上行', downside: '若经济数据弱于预期，可能下探区间下沿', watch: '纳指期货与美元指数' },
+  wti: { context: '[演示] 本小时无数据发布，油价延续早盘区间整理', upside: '若中东航运消息再度紧张，价格可能冲向区间上沿', downside: '若美元走强或风险偏好回落，可能回到区间下沿', watch: '霍尔木兹海峡航运动态', lean: '偏涨', confidence: '低', reason: '[演示] 航运风险溢价仍在，近 6 小时走势偏强' },
+  brent: { context: '[演示] 与 WTI 同步，价差稳定', upside: '欧洲炼厂需求数据好于预期时可能走强', downside: '若 OPEC+ 增产传闻发酵，可能承压', watch: '布伦特-WTI 价差', lean: '中性', confidence: '低', reason: '[演示] 本小时无明确驱动' },
+  gold: { context: '[演示] 美元指数小幅走弱', upside: '若美债收益率继续回落，金价可能向上沿运动', downside: '若美联储官员讲话偏鹰，可能回落', watch: '10 年期美债收益率', lean: '偏涨', confidence: '中', reason: '[演示] 美元走弱、收益率回落' },
+  es: { context: '[演示] 美股盘前，科技股财报季', upside: '大型科技股盘前走强时可能带动指数上行', downside: '若经济数据弱于预期，可能下探区间下沿', watch: '纳指期货与美元指数', lean: '中性', confidence: '低', reason: '[演示] 盘前方向不明' },
 };
 let olNow = Math.floor(NOW / H) * H + 600;
 while (!isOpen('globex', new Date(olNow * 1000))) olNow -= H;
@@ -361,14 +362,24 @@ for (const inst of INSTRUMENTS) {
     const act = rows.find((r) => priceTime(r) === o.window_end);
     if (!act) continue;
     const hit68 = act.close >= o.lo68 && act.close <= o.hi68 ? 1 : 0, hit95 = act.close >= o.lo95 && act.close <= o.hi95 ? 1 : 0;
-    hist.push({ window_start: iso(o.window_start), window_end: iso(o.window_end), base_price: o.base_price, lo68: o.lo68, hi68: o.hi68, lo95: o.lo95, hi95: o.hi95, actual: +act.close.toFixed(6), hit68, hit95, evaluated: true });
+    const pr = predictDirection(known, o.window_start);
+    const dir = actualDirection(o.base_price, act.close, o.sigma_pct);
+    const mc = !pr || Math.abs(pr.p_up - 0.5) < NO_CALL ? 0 : pr.p_up > 0.5 ? 1 : -1;
+    const sc = (c) => (!dir || !c ? null : c === dir ? 1 : 0);
+    const aiDemo = [1, -1, 0][(o.window_start / H) % 3]; // 演示用的 AI 判断（轮流），不代表真实表现
+    hist.push({ window_start: iso(o.window_start), window_end: iso(o.window_end), base_price: o.base_price, lo68: o.lo68, hi68: o.hi68, lo95: o.lo95, hi95: o.hi95, actual: +act.close.toFixed(6), hit68, hit95, evaluated: true,
+      p_up: pr?.p_up ?? null, dir_actual: dir, model_hit: sc(mc), ai_hit: sc(aiDemo), naive_hit: sc(pr?.naive_dir || 0), brier: pr && dir ? (pr.p_up - (dir > 0 ? 1 : 0)) ** 2 : null });
   }
   const h68 = hist.reduce((a, h) => a + h.hit68, 0), h95 = hist.reduce((a, h) => a + h.hit95, 0);
   tot = { n: tot.n + hist.length, h68: tot.h68 + h68, h95: tot.h95 + h95 };
+  const dstat = (k) => { const xs = hist.filter((h) => h[k] !== null); return { calls: xs.length, hits: xs.filter((h) => h[k]).length, rate: xs.length ? +(xs.filter((h) => h[k]).length / xs.length).toFixed(3) : null }; };
+  const bs = hist.filter((h) => h.brier !== null);
+  const direction = { model: dstat('model_hit'), ai: dstat('ai_hit'), naive: dstat('naive_hit'), brier: bs.length ? +(bs.reduce((a, h) => a + h.brier, 0) / bs.length).toFixed(4) : null, brier_n: bs.length, _bs: bs.reduce((a, h) => a + h.brier, 0) };
   const tr = { key: inst.key, name: inst.name, n: hist.length, hit68: hist.length ? +(h68 / hist.length).toFixed(3) : null, hit95: hist.length ? +(h95 / hist.length).toFixed(3) : null,
-    above68: hist.filter((h) => h.actual > h.hi68).length, below68: hist.filter((h) => h.actual < h.lo68).length };
+    above68: hist.filter((h) => h.actual > h.hi68).length, below68: hist.filter((h) => h.actual < h.lo68).length, direction };
   trackBy.push(tr);
-  const current = cur.status === 'open' ? { ...cur, window_start: iso(cur.window_start), window_end: iso(cur.window_end), made_at: iso(cur.made_at), base_time: iso(cur.base_ts), status: 'current', instrument: inst.key, name: inst.name, unit: inst.unit, ai: DEMO_AI[inst.key] || null } : null;
+  const prNow = cur.status === 'open' ? predictDirection(upTo, cur.window_start) : null;
+  const current = cur.status === 'open' ? { ...cur, p_up: prNow?.p_up ?? null, features: prNow?.features ?? null, window_start: iso(cur.window_start), window_end: iso(cur.window_end), made_at: iso(cur.made_at), base_time: iso(cur.base_ts), status: 'current', instrument: inst.key, name: inst.name, unit: inst.unit, ai: DEMO_AI[inst.key] || null } : null;
   olRows[inst.key] = current || { instrument: inst.key, name: inst.name, status: 'closed' };
   hourlyDemo[inst.key] = { instrument: inst.key, contract: curves[inst.key].active, candles: hourlyCandles(rows.filter((r) => r.ts <= olNow - H), 72), current, session_open: !!current,
     history: hist.reverse(), hour_profile: stats ? Object.entries(stats.hour).map(([h, v]) => ({ hour: Number(h), sigma_pct: +(v.sigma * 100).toFixed(4), n: v.n })) : [],
@@ -394,7 +405,11 @@ for (const inst of INSTRUMENTS) {
   intradayDemo[inst.key] = { instrument: inst.key, contract: curves[inst.key].active, candles: out };
 }
 const rate = (a, n) => (n ? +(a / n).toFixed(3) : null);
-const outlookTrack = { days: 30, target68: 0.683, target95: 0.954, overall: { n: tot.n, hit68: rate(tot.h68, tot.n), hit95: rate(tot.h95, tot.n) }, by_instrument: trackBy };
+const sumD = (k) => { const calls = trackBy.reduce((a, t) => a + t.direction[k].calls, 0), hits = trackBy.reduce((a, t) => a + t.direction[k].hits, 0); return { calls, hits, rate: rate(hits, calls) }; };
+const bN = trackBy.reduce((a, t) => a + t.direction.brier_n, 0), bS = trackBy.reduce((a, t) => a + t.direction._bs, 0);
+trackBy.forEach((t) => delete t.direction._bs);
+const outlookTrack = { days: 30, target68: 0.683, target95: 0.954, brier_baseline: 0.25,
+  overall: { n: tot.n, hit68: rate(tot.h68, tot.n), hit95: rate(tot.h95, tot.n), direction: { model: sumD('model'), ai: sumD('ai'), naive: sumD('naive'), brier: bN ? +(bS / bN).toFixed(4) : null, brier_n: bN } }, by_instrument: trackBy };
 const outlook = { now: iso(NOW), window_start: iso(Math.floor(olNow / H) * H), commentary_model: 'groq（演示）', instruments: INSTRUMENTS.map((i) => olRows[i.key]), track: outlookTrack };
 
 // ---------------- 总览 ----------------
@@ -412,5 +427,5 @@ const overview = {
 
 writeFileSync(new URL('../public/demo.json', import.meta.url), JSON.stringify({ events, details, calibration, instruments, instrumentDetails, overview, outlook, hourly: hourlyDemo, intraday: intradayDemo }));
 for (const d of Object.values(details)) if (d.event.market) console.log(d.event.id, d.event.title_zh, 'model', d.event.market.model_score, '→', d.event.market.blended_score, d.event.market.instruments.map((r) => `${r.key}:${r.z}:${r.verdict}`).join(' '));
-console.log('一小时区间（演示回测）', outlookTrack.overall);
+console.log('一小时区间与方向（演示回测）', JSON.stringify(outlookTrack.overall));
 console.log(instruments.map((i) => `${i.key} ${i.contract} ${i.stats.last.toFixed(2)} ${i.structure}`).join('\n'));

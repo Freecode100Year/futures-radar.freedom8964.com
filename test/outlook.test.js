@@ -111,9 +111,9 @@ test('定时任务：整点生成展望 + AI 情景，之后自动核对，接�
   env.AI._chat = async (model, input) => {
     prompt = input.messages.at(-1).content;
     return { response: JSON.stringify({ items: [
-      { instrument: 'wti', context: 'EIA 数据前夕', upside: '若库存降幅超预期，价格可能冲向区间上沿', downside: '若库存意外增加，可能回落至区间下沿', watch: 'EIA 原油库存' },
-      { instrument: 'gold', context: '美元走弱', upside: '美元继续走弱时可能上行', downside: '美债收益率上行时可能承压', watch: '美元指数' },
-      { instrument: 'es', context: '财报季', upside: '大型科技股走强', downside: '建议做空规避风险', watch: '纳指' }, // 含交易指令 → 丢弃
+      { instrument: 'wti', context: 'EIA 数据前夕', upside: '若库存降幅超预期，价格可能冲向区间上沿', downside: '若库存意外增加，可能回落至区间下沿', watch: 'EIA 原油库存', lean: '偏涨', confidence: '中', reason: '库存预期下降' },
+      { instrument: 'gold', context: '美元走弱', upside: '美元继续走弱时可能上行', downside: '美债收益率上行时可能承压', watch: '美元指数', lean: '中性', confidence: '低', reason: '无明确驱动' },
+      { instrument: 'es', context: '财报季', upside: '大型科技股走强', downside: '建议做空规避风险', watch: '纳指', lean: '偏跌', confidence: '低', reason: '情绪转弱' }, // 含交易指令 → 丢弃
     ] }) };
   };
 
@@ -147,9 +147,55 @@ test('定时任务：整点生成展望 + AI 情景，之后自动核对，接�
 
   const track = await (await worker.fetch(new Request('https://x/api/outlook/track'), env, {})).json();
   assert.equal(track.overall.n, 3);
+  // 方向：统计模型概率、AI 判断都已保存并核对
+  const d = env.DB._db.prepare("SELECT p_up, ai_lean, ai_conf, dir_actual, ai_hit, naive_hit FROM hourly_outlook WHERE instrument = 'wti' AND window_start = ?").get(t0);
+  assert.ok(d.p_up > 0.3 && d.p_up < 0.7, `p_up ${d.p_up}`);
+  assert.equal(d.ai_lean, '偏涨');
+  assert.ok([-1, 0, 1].includes(d.dir_actual));
+  if (d.dir_actual) assert.equal(d.ai_hit, d.dir_actual === 1 ? 1 : 0);
+  const g = env.DB._db.prepare("SELECT ai_lean, ai_hit FROM hourly_outlook WHERE instrument = 'gold' AND window_start = ?").get(t0);
+  assert.equal(g.ai_hit, null, 'AI 判"中性"不计入命中率');
+  assert.ok(track.overall.direction && 'brier' in track.overall.direction);
   const hr = await getHourly(env, 'wti', { nowSec: t0 + H + 900, hours: 48 });
   assert.equal((await (await worker.fetch(new Request('https://x/api/instruments/wti/hourly'), env, {})).json()).instrument, 'wti');
   assert.equal(hr.candles.length, 48);
   assert.equal(hr.history.length, 1);
   assert.equal(hr.hour_profile.length, 24);
+});
+
+test('方向模型：有惯性的序列能学到，随机序列给出接近 50% 的概率', async () => {
+  const { predictDirection, actualDirection } = await import('../src/predict.js');
+  const make = (phi, seed) => {
+    const g = rng(seed);
+    const out = [];
+    let p = 100, prev = 0;
+    for (let t = Date.UTC(2026, 0, 5) / 1000; out.length < 1900; t += H) {
+      if (!isOpen('globex', new Date((t + 1800) * 1000))) continue;
+      const r = phi * prev + g() * 0.002;
+      prev = r;
+      p *= Math.exp(r);
+      out.push({ ts: t, close: p });
+    }
+    return out;
+  };
+  let hit = 0, n = 0, spread = 0;
+  const mom = make(0.3, 3);
+  for (let k = 1700; k < 1890; k += 1) {
+    const pr = predictDirection(mom.slice(k - 1600, k + 1), mom[k + 1].ts);
+    if (!pr) continue; // 周末后不足 24 根连续K线
+    if ((pr.p_up > 0.5) === (mom[k + 1].close > mom[k].close)) hit++;
+    n++;
+  }
+  assert.ok(hit / n > 0.54, `惯性序列命中率 ${(hit / n).toFixed(3)}`);
+  const rnd = make(0, 4);
+  let m = 0;
+  for (let k = 1700; k < 1890; k += 10) {
+    const pr = predictDirection(rnd.slice(k - 1600, k + 1), rnd[k + 1].ts);
+    if (!pr) continue;
+    spread += Math.abs(pr.p_up - 0.5);
+    m++;
+  }
+  assert.ok(m > 10 && spread / m < 0.06, `随机序列平均偏离 50% 的幅度 ${(spread / m).toFixed(3)}`);
+  assert.equal(actualDirection(100, 100.001, 0.2), 0, '变动小于 0.1 倍波动算持平');
+  assert.equal(actualDirection(100, 101, 0.2), 1);
 });

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { CREATE_STATEMENTS, ensureSchema, resetSchemaCheck, nameOf } from '../src/schema-guard.js';
+import { CREATE_STATEMENTS, ADD_COLUMNS, ensureSchema, resetSchemaCheck, nameOf } from '../src/schema-guard.js';
 import { sessionDate } from '../src/sessions.js';
 import { dailyCloses } from '../src/futures.js';
 import { tradingDay } from '../src/contracts.js';
@@ -9,8 +9,11 @@ import worker, { itemErrors } from '../src/index.js';
 import { makeEnv } from './mock-env.js';
 
 test('自动建表清单与迁移 0006–0010 保持一致', () => {
-  for (const f of ['0006_market_tools', '0007_opencode_health', '0008_cron_log', '0009_hourly_outlook', '0010_quotes_5m']) {
+  for (const f of ['0006_market_tools', '0007_opencode_health', '0008_cron_log', '0009_hourly_outlook', '0010_quotes_5m', '0011_direction']) {
     const sql = readFileSync(new URL(`../migrations/${f}.sql`, import.meta.url), 'utf8');
+    for (const m of sql.matchAll(/ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)/gi)) {
+      assert.ok(ADD_COLUMNS.some(([t, c]) => t === m[1] && c === m[2]), `${f} 的 ${m[1]}.${m[2]} 不在自动补列清单里`);
+    }
     for (const m of sql.matchAll(/CREATE\s+(?:TABLE|INDEX)\s+IF\s+NOT\s+EXISTS\s+(\w+)/gi)) {
       assert.ok(CREATE_STATEMENTS.some((s) => nameOf(s) === m[1]), `${f} 的 ${m[1]} 不在自动建表清单里`);
     }
@@ -28,7 +31,8 @@ test('漏跑迁移：缺表自动补建、缺列自动补加，报价接口恢�
   const st = await (await worker.fetch(new Request('https://x/api/data-status'), env, {})).json();
   assert.deepEqual(st.table_errors, {});
   assert.ok(st.schema_guard.created.includes('quotes') && st.schema_guard.created.includes('prices_5m'));
-  assert.deepEqual(st.schema_guard.added, ['prices.open', 'prices.high', 'prices.low']);
+  assert.deepEqual(st.schema_guard.added.slice(0, 3), ['prices.open', 'prices.high', 'prices.low']);
+  assert.ok(st.schema_guard.added.includes('hourly_outlook.p_up'), '刚补建的表也会补上新列');
   assert.equal(st.ok, false, '报价还没更新过 → 总闸为 false');
   assert.ok(st.problems.some((p) => /报价/.test(p)));
   resetSchemaCheck();

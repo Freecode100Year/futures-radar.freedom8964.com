@@ -1,7 +1,21 @@
 // 小时行情与"未来一小时风险展望"（依赖 app.js / tools.js 中的 esc、fmt、fmtPrice、sign、cls、api、loadDemo、state、SHORT）
 // 展望是统计波动区间，不是涨跌预测。
 
-const OUTLOOK_NOTE = '区间由近 70 天同一时段的历史波动率估算（含数据发布时段的放大），表示"价格大概率在这个范围内波动"，不代表方向判断。';
+const OUTLOOK_NOTE = '区间由近 70 天同一时段的历史波动率估算（含数据发布时段的放大），表示"价格大概率在这个范围内波动"。';
+const DIR_NOTE = '方向是概率判断，不是交易建议：1 小时的价格变动大部分是噪音，统计模型的概率通常只在 45%–55% 之间。每次判断都会在窗口结束后公开核对，请以命中率和对照基准为准。';
+
+/** 上涨概率条：中间是 50%，向右为上涨、向左为下跌 */
+function probBar(p) {
+  if (p === null || p === undefined) return '<span class="note">—</span>';
+  const up = p >= 0.5, pct = Math.round(Math.max(p, 1 - p) * 100), w = Math.min(50, Math.abs(p - 0.5) * 100 * 2.5);
+  const lbl = Math.abs(p - 0.5) < 0.02 ? '无明显倾向' : `${up ? '涨' : '跌'} ${pct}%`;
+  return `<span class="pbar" title="统计模型：上涨概率 ${Math.round(p * 100)}%"><i style="${up ? 'left:50%' : `left:${50 - w}%`};width:${w}%;background:var(${up ? '--up' : '--down'})"></i></span><span class="mono small ${Math.abs(p - 0.5) < 0.02 ? 'note' : up ? 'up' : 'down'}">${lbl}</span>`;
+}
+const LEAN_CLS = { 偏涨: 'up', 偏跌: 'down', 中性: 'flat' };
+function leanChip(ai) {
+  if (!ai?.lean) return '<span class="note">—</span>';
+  return `<span class="lean ${LEAN_CLS[ai.lean] || 'flat'}" title="${esc(ai.reason || '')}">${esc(ai.lean)}${ai.confidence ? `<em>${esc(ai.confidence)}</em>` : ''}</span>`;
+}
 
 async function fetchOutlook() {
   return (await api('/api/outlook')) || (await loadDemo()).outlook || null;
@@ -33,7 +47,7 @@ function outlookOverviewHtml(ol, visibleKeys) {
   const cur = ol.instruments.find((i) => i.window_start);
   const body = rows.map((o) => {
     if (!o.window_start) {
-      return `<tr><td><a href="#i-${esc(o.instrument)}">${esc(SHORT[o.instrument] || o.name)}</a></td><td colspan="5" class="note">${o.status === 'closed' ? '本小时休市' : '等待整点生成'}</td></tr>`;
+      return `<tr><td><a href="#i-${esc(o.instrument)}">${esc(SHORT[o.instrument] || o.name)}</a></td><td colspan="7" class="note">${o.status === 'closed' ? '本小时休市' : '等待整点生成'}</td></tr>`;
     }
     const ev = (o.events || []).map((e) => `<span class="evchip" title="${esc(e.title)} ${hhmm(e.ts)}">${esc(e.title.replace(/（.*?）/g, ''))} ${hhmm(e.ts)}</span>`).join('');
     return `<tr${o.status === 'previous' ? ' class="stale"' : ''}>
@@ -41,16 +55,20 @@ function outlookOverviewHtml(ol, visibleKeys) {
       <td class="r mono">${fmtPrice(o.base_price)}<div class="note small">${hhmm(o.base_time)}</div></td>
       <td>${rangeBar(o)}</td>
       <td class="r mono">${pctTxt(o.width68_pct)}<div class="note small">95% ${pctTxt(o.width95_pct)}</div></td>
+      <td class="pcell">${probBar(o.p_up)}</td>
+      <td>${leanChip(o.ai)}</td>
       <td>${ev || '<span class="note">—</span>'}${o.regime >= 1.25 ? ' <span class="evchip hot" title="近 24 小时实际波动高于长期水平">波动偏高</span>' : ''}</td>
       <td class="aiw">${o.ai ? esc(o.ai.watch) : '<span class="note">—</span>'}</td>
     </tr>`;
   }).join('');
-  return `<div class="box"><h4>未来一小时风险展望 <span class="note">${cur ? `窗口 ${windowLabel(cur)} · ` : ''}统计波动区间，不预测涨跌</span></h4>
+  const d = t?.direction;
+  return `<div class="box"><h4>未来一小时展望 <span class="note">${cur ? `窗口 ${windowLabel(cur)} · ` : ''}波动区间 + 方向概率，不构成投资建议</span></h4>
     <div class="tablewrap"><table class="olt">
-      <thead><tr><th>品种</th><th class="r">基准价</th><th>68% / 95% 区间</th><th class="r">68% 幅度</th><th>本小时数据发布</th><th>AI：本小时关注</th></tr></thead>
+      <thead><tr><th>品种</th><th class="r">基准价</th><th>68% / 95% 区间</th><th class="r">68% 幅度</th><th>统计模型方向</th><th>AI 判断</th><th>本小时数据发布</th><th>AI：本小时关注</th></tr></thead>
       <tbody>${body}</tbody>
     </table></div>
-    <p class="note">${OUTLOOK_NOTE} 基准价有 10–30 分钟延迟。区间命中记录（近 30 天）：68% 区间 <b class="${rateCls(t?.hit68, 0.683)}">${rateTxt(t?.hit68)}</b>，95% 区间 <b class="${rateCls(t?.hit95, 0.954)}">${rateTxt(t?.hit95)}</b>，共 ${t?.n ?? 0} 次 · <a href="#calibration">详情</a></p>
+    <p class="note">${OUTLOOK_NOTE} 基准价有 10–30 分钟延迟。近 30 天：68% 区间命中 <b class="${rateCls(t?.hit68, 0.683)}">${rateTxt(t?.hit68)}</b>（${t?.n ?? 0} 次）；方向命中率 统计模型 <b>${rateTxt(d?.model?.rate)}</b>（${d?.model?.calls ?? 0} 次）、AI <b>${rateTxt(d?.ai?.rate)}</b>（${d?.ai?.calls ?? 0} 次），对照"照抄上一小时" ${rateTxt(d?.naive?.rate)}、随机猜 50% · <a href="#calibration">详情</a></p>
+    <p class="note small">${DIR_NOTE}</p>
   </div>`;
 }
 
@@ -133,22 +151,28 @@ function outlookCard(o, open) {
       <tr><td>波动状态</td><td class="mono">${o.regime}×</td><td class="note">近 24 小时实际波动 ÷ 长期水平</td></tr>
       ${(o.events || []).map((e) => `<tr><td>数据发布</td><td>${esc(e.title)}</td><td class="note">${hhmm(e.ts)}${o.event_adj ? ` · 区间放大 ${o.event_adj.factor}×（${esc(o.event_adj.basis)}）` : ''}</td></tr>`).join('')}
     </tbody></table>
+    <div class="dirbox">
+      <div><span class="note">统计模型</span> ${probBar(o.p_up)}</div>
+      <div><span class="note">AI 判断</span> ${leanChip(ai)} ${ai?.reason ? `<span class="small">${esc(ai.reason)}</span>` : ''}</div>
+      <p class="note small">${DIR_NOTE}</p>
+    </div>
     ${ai ? `<div class="scen">
       <p class="note">${esc(ai.context)}</p>
       <div class="sc up"><b>上行情景</b>${esc(ai.upside)}</div>
       <div class="sc down"><b>下行情景</b>${esc(ai.downside)}</div>
       <p><span class="note">本小时关注：</span>${esc(ai.watch)}</p>
-    </div>` : '<p class="note">本小时没有 AI 情景。为了让解读有内容，AI 只在以下情况撰写：本小时有数据发布、近 24 小时波动偏高、有相关新闻，以及每天两个固定时段（美东 18:00 夜盘开盘、9:00 美股开盘前）。统计区间每小时都会更新。</p>'}
-    <p class="note small">${OUTLOOK_NOTE} 情景由 AI 根据行情和新闻撰写，两个方向都会列出，不判断哪个更可能发生。</p>
+    </div>` : '<p class="note">本小时的 AI 判断和情景还在生成，或本次生成失败（每个整点后几分钟内完成）。</p>'}
+    <p class="note small">${OUTLOOK_NOTE} 情景由 AI 根据行情和新闻撰写，两个方向都会列出。</p>
   </div>`;
 }
 
 function trackCard(tr, history) {
-  const dots = (history || []).slice().reverse().map((h) => `<i class="dot ${h.hit68 === null ? 'na' : h.hit68 ? 'in' : h.hit95 ? 'mid' : 'out'}" title="${windowLabel(h)} 实际 ${fmtPrice(h.actual)}（68%: ${fmtPrice(h.lo68)}–${fmtPrice(h.hi68)}）"></i>`).join('');
+  const dots = (history || []).slice().reverse().map((h) => `<i class="dot ${h.hit68 === null ? 'na' : h.hit68 ? 'in' : h.hit95 ? 'mid' : 'out'}" title="${windowLabel(h)} 实际 ${fmtPrice(h.actual)}（68%: ${fmtPrice(h.lo68)}–${fmtPrice(h.hi68)}）· 实际方向 ${h.dir_actual === 1 ? '涨' : h.dir_actual === -1 ? '跌' : '持平'} · 模型 ${h.model_hit === null ? '不计' : h.model_hit ? '✓' : '✗'} · AI ${h.ai_hit === null ? '不计' : h.ai_hit ? '✓' : '✗'}"></i>`).join('');
   return `<div class="tiles t2">
       <div class="tile"><span>68% 区间命中</span><b class="${rateCls(tr?.hit68, 0.683)}">${rateTxt(tr?.hit68)}</b><em>目标约 68% · ${tr?.n ?? 0} 次</em></div>
       <div class="tile"><span>95% 区间命中</span><b class="${rateCls(tr?.hit95, 0.954)}">${rateTxt(tr?.hit95)}</b><em>目标约 95%${tr?.n ? ` · 向上越界 ${tr.above68} · 向下 ${tr.below68}` : ''}</em></div>
     </div>
+    ${dirTable(tr?.direction)}
     ${dots ? `<div class="dots">${dots}</div><p class="note small">最近 24 个窗口：<i class="dot in"></i>落在 68% 区间 <i class="dot mid"></i>落在 95% 区间 <i class="dot out"></i>超出 95% <i class="dot na"></i>无法核对</p>` : '<p class="note">还没有已核对的窗口（每个窗口结束约 30 分钟后核对）。</p>'}`;
 }
 
@@ -220,7 +244,7 @@ async function outlookTrackHtml() {
   const tr = (await api('/api/outlook/track?days=30')) || (await loadDemo()).outlook?.track;
   if (!tr) return '';
   const o = tr.overall;
-  return `<div class="box"><h4>一小时风险区间命中率 <span class="note">近 ${tr.days} 天</span></h4>
+  return `<div class="box"><h4>一小时区间命中率 <span class="note">近 ${tr.days} 天</span></h4>
     <div class="tiles">
       <div class="tile"><span>68% 区间</span><b class="${rateCls(o.hit68, tr.target68)}">${rateTxt(o.hit68)}</b><em>目标 68% · ${o.n} 次</em></div>
       <div class="tile"><span>95% 区间</span><b class="${rateCls(o.hit95, tr.target95)}">${rateTxt(o.hit95)}</b><em>目标 95%</em></div>
@@ -231,6 +255,19 @@ async function outlookTrackHtml() {
         <td class="r mono ${rateCls(i.hit68, tr.target68)}">${rateTxt(i.hit68)}</td><td class="r mono ${rateCls(i.hit95, tr.target95)}">${rateTxt(i.hit95)}</td>
         <td class="r mono">${i.n ? i.above68 : '—'}</td><td class="r mono">${i.n ? i.below68 : '—'}</td></tr>`).join('')}
     </tbody></table>
+    <h4 style="margin-top:18px">一小时方向命中率 <span class="note">近 ${tr.days} 天 · 涨跌幅小于 0.1 倍预期波动算持平、不计入</span></h4>
+    <div class="tiles">
+      <div class="tile"><span>统计模型</span><b>${rateTxt(o.direction?.model?.rate)}</b><em>${o.direction?.model?.calls ?? 0} 次 · Brier ${o.direction?.brier ?? '—'}（基准 0.25）</em></div>
+      <div class="tile"><span>AI 判断</span><b>${rateTxt(o.direction?.ai?.rate)}</b><em>${o.direction?.ai?.calls ?? 0} 次（"中性"不计入）</em></div>
+      <div class="tile"><span>对照：照抄上一小时</span><b>${rateTxt(o.direction?.naive?.rate)}</b><em>${o.direction?.naive?.calls ?? 0} 次 · 随机猜为 50%</em></div>
+    </div>
+    <table><thead><tr><th>品种</th><th class="r">模型次数</th><th class="r">模型命中</th><th class="r">AI 次数</th><th class="r">AI 命中</th><th class="r">照抄上一小时</th><th class="r">Brier</th></tr></thead><tbody>
+      ${tr.by_instrument.map((i) => `<tr><td><a href="#i-${esc(i.key)}">${esc(i.name)}</a></td>
+        <td class="r mono">${i.direction?.model?.calls ?? 0}</td><td class="r mono">${rateTxt(i.direction?.model?.rate)}</td>
+        <td class="r mono">${i.direction?.ai?.calls ?? 0}</td><td class="r mono">${rateTxt(i.direction?.ai?.rate)}</td>
+        <td class="r mono">${rateTxt(i.direction?.naive?.rate)}</td><td class="r mono">${i.direction?.brier ?? '—'}</td></tr>`).join('')}
+    </tbody></table>
+    <p class="note">命中率要和对照基准一起看：长期明显高于 50% 且高于"照抄上一小时"，才说明判断有价值；样本少于 200 次时，55% 和 50% 在统计上分不开。Brier 分数衡量概率本身准不准，低于 0.25 才比"永远说五五开"好。</p>
     <p class="note">每个整点为开盘品种生成本小时的统计区间，窗口结束、延迟行情到达后自动用实际价格核对。越界次数明显偏向一侧，说明这段时间有单边行情，而不是区间算错。样本少于 100 次时比例波动较大。</p>
   </div>`;
 }
@@ -289,4 +326,16 @@ function quoteBanner(st) {
     <a href="/api/data-status" target="_blank" rel="noopener">数据状态</a> ·
     <button type="button" onclick="location.reload()">重试</button> ·
     <button type="button" onclick="sessionStorage.setItem('fr-quote-banner-off','1');this.closest('#quoteBanner').remove()">关闭</button></div>`;
+}
+
+/** 方向命中率对照表：统计模型 / AI / 照抄上一小时 / 随机猜 */
+function dirTable(d) {
+  if (!d) return '';
+  const row = (name, x, note) => `<tr><td>${name}</td><td class="r mono">${x ? x.calls : '—'}</td><td class="r mono ${x?.rate !== null && x?.rate !== undefined ? (x.rate > 0.53 ? 'rgood' : x.rate < 0.47 ? 'rwarn' : '') : ''}">${x ? rateTxt(x.rate) : '50%'}</td><td class="note small">${note}</td></tr>`;
+  return `<h5>方向命中率</h5><table class="kv dirt"><thead><tr><th></th><th class="r">次数</th><th class="r">命中率</th><th></th></tr></thead><tbody>
+    ${row('统计模型', d.model, `Brier ${d.brier ?? '—'}（永远报 50% 为 0.25，越低越好）`)}
+    ${row('AI 判断', d.ai, '"中性"不计入')}
+    ${row('照抄上一小时', d.naive, '最简单的对照基准')}
+    ${row('随机猜', null, '')}
+  </tbody></table>`;
 }
