@@ -1,6 +1,6 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractJson, sanitize, generate, chainFor, selfTest, status, freeOpencodeModels, checkOpencodeModel } from '../src/llm.js';
+import { extractJson, sanitize, generate, chainFor, selfTest, status, freeOpencodeModels, checkOpencodeModel, geminiRetry, secondsToPacificMidnight } from '../src/llm.js';
 import { makeEnv } from './mock-env.js';
 
 const schema = {
@@ -226,4 +226,46 @@ test('OpenCode 当前模型探测失败时继续试下一个免费模型', async
   assert.deepEqual(attempted, ['deepseek-v4.1-flash-free', 'glm-5.3-flash-free']);
   assert.equal(result.status, '正常');
   assert.equal(result.model, 'glm-5.3-flash-free');
+});
+
+// ---- Gemini ----（前面的 OpenCode 测试替换过 fetch，这里恢复路由用的模拟）
+const routerFetch = async (url, init) => {
+  const host = new URL(url).host;
+  calls.push(host);
+  return behavior[host] ? behavior[host](JSON.parse(init.body)) : new Response('no mock', { status: 500 });
+};
+const geminiOk = (obj) => Response.json({ modelVersion: 'gemini-3.1-flash-lite', candidates: [{ content: { parts: [{ text: JSON.stringify(obj) }] } }], usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 10 } });
+const quota429 = (quotaId, retryDelay) => new Response(JSON.stringify({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', details: [
+  { '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaId }] },
+  ...(retryDelay ? [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay }] : []),
+] } }), { status: 429 });
+
+test('Gemini 429：区分每分钟限流和当天额度用完', () => {
+  const t = Date.parse('2026-11-03T07:00:00Z'); // 太平洋时间 23:00
+  assert.deepEqual(geminiRetry(429, JSON.stringify({ error: { details: [{ retryDelay: '37s' }] } }), t), { retryAfter: 37, daily: false });
+  assert.deepEqual(geminiRetry(429, '{}', t), { retryAfter: 60, daily: false });
+  const d = geminiRetry(429, JSON.stringify({ error: { details: [{ violations: [{ quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier' }] }] } }), t);
+  assert.equal(d.daily, true);
+  assert.equal(d.retryAfter, secondsToPacificMidnight(t));
+  assert.ok(Math.abs(d.retryAfter - 3660) <= 1, '冷却到太平洋时间零点（约 1 小时后）');
+  assert.equal(geminiRetry(500, '{}', t), null);
+});
+
+test('Gemini：每日上限可用 GEMINI_DAILY_REQUESTS 调整；当天额度用完时冷却到重置并换下一家', async () => {
+  globalThis.fetch = routerFetch;
+  const e = makeEnv({ GEMINI_API_KEY: 'k', ZHIPU_API_KEY: 'z', GEMINI_DAILY_REQUESTS: '2' });
+  behavior['generativelanguage.googleapis.com'] = () => geminiOk(good);
+  behavior['open.bigmodel.cn'] = () => openaiReply(good);
+  assert.equal((await run(e, ['gemini', 'glm'])).provider, 'gemini');
+  assert.equal((await run(e, ['gemini', 'glm'])).provider, 'gemini');
+  const third = await run(e, ['gemini', 'glm']);
+  assert.equal(third.provider, 'glm', '超过自设上限后不再请求 Gemini');
+  assert.equal(calls.filter((h) => h === 'generativelanguage.googleapis.com').length, 2);
+
+  const e2 = makeEnv({ GEMINI_API_KEY: 'k', ZHIPU_API_KEY: 'z' });
+  behavior['generativelanguage.googleapis.com'] = () => quota429('GenerateRequestsPerDayPerProjectPerModel-FreeTier');
+  const r = await run(e2, ['gemini', 'glm']);
+  assert.equal(r.provider, 'glm');
+  const st = e2.DB._db.prepare("SELECT cooldown_until FROM provider_state WHERE provider = 'gemini'").get();
+  assert.ok(Date.parse(st.cooldown_until) - Date.now() > 3600 * 1000 || secondsToPacificMidnight() < 3700, '冷却超过 1 小时（直到太平洋时间零点）');
 });

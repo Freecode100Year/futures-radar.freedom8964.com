@@ -141,16 +141,17 @@ Yahoo 期货合约日线 ─► 期限结构 + 识别主力合约 ─► 主力�
 | Ollama Cloud | `deepseek-v4-flash` | 免费版有用量上限 | 默认每天 300 次（可调） |
 | OpenCode Zen | `deepseek-v4-flash-free` | 免费模型 | 默认每天 200 次（可调） |
 | OpenRouter | `openrouter/free` | 50 次/天、每分钟 20 次 | 每天 45 次封顶，不做修复重试 |
-| Google Gemini | `gemini-3.1-flash-lite` | 免费档，额度按 AI Studio 项目和模型显示 | Worker 每日最多 10 次，不启用付费工具 |
+| Google Gemini | `gemini-3.1-flash-lite` | 免费档约 10 次/分钟、25 万 token/分钟、500 次/天（截至 2026-10 的公开资料，按项目和模型计，太平洋时间零点重置；以 AI Studio 显示为准） | 默认每天 400 次封顶；每分钟限流按响应里的 retryDelay 冷却，当天额度用完冷却到太平洋时间零点 |
 | Claude（可选，付费） | Haiku 5.5 / Sonnet 5.5 | — | 受 `DAILY_BUDGET_USD` 约束 |
 
-**当前部署调用顺序**（见 `wrangler.toml`）：各任务按各自配置的顺序尝试免费提供商，Gemini 使用 `gemini-3.1-flash-lite`，每日最多 10 次，仅在同一链上排在它前面的提供商不可用时尝试。
-- **分诊**：Qwen → 智谱 → Groq 70B → Ollama → OpenCode → OpenRouter → Gemini
-- **每日品种解读**：智谱 → Ollama → Groq 70B → OpenCode → OpenRouter → Qwen → Gemini
-- **一般/重要事件深度分析**：Qwen → 智谱 → Ollama → OpenCode → OpenRouter → Gemini
-- Groq 70B 每天最多 1,000 次；OpenRouter 每天最多 45 次，为 50 次免费额度保留余量。Workers AI 同时保留每天 8,000 Neurons 的代码保护阈值。
+**当前部署调用顺序**（见 `wrangler.toml`）：
+- **分诊**：Qwen → 智谱 → Groq 70B → Ollama → OpenCode → OpenRouter → Gemini。分诊量最大、请求密集，Gemini 每分钟只有 10 次，只放在最后兜底。
+- **一般/重要事件深度分析**：Qwen → Gemini → 智谱 → Ollama → OpenCode → OpenRouter。提示约 1 万 token，Gemini Flash-Lite 的长提示和原生 JSON 输出比较稳。
+- **每日品种解读**：智谱 → Gemini → Ollama → Groq 70B → OpenCode → OpenRouter → Qwen。12 个品种每 30 秒发一个，不会撞上每分钟 10 次的限制。
+- **一小时风险情景**：Groq 70B → Gemini → 智谱 → Ollama → OpenCode → OpenRouter → Qwen。
+- 估计 Gemini 每天用 30–80 次，远低于 400 次的上限。Groq 70B 每天最多 1,000 次；OpenRouter 每天最多 45 次，为 50 次免费额度保留余量。Workers AI 同时保留每天 8,000 Neurons 的代码保护阈值。
 
-Gemini 通过 `GEMINI_API_KEY` secret 配置；`GEMINI_MODEL` 默认是 `gemini-3.1-flash-lite`，D1 会在每个太平洋日期原子预占额度，每日硬上限为 10 次（配置只能调低，不能调高）。应用内上限只限制本 Worker 的调用，无法限制同一个 key 在其他项目中的使用；项目绑定计费状态和实时免费额度需在 Google AI Studio 检查。不要为 Gemini 启用 Google Search/Maps grounding、Batch 或其他付费工具。
+Gemini 通过 `GEMINI_API_KEY` secret 配置，`GEMINI_MODEL` 默认是 `gemini-3.1-flash-lite`。不要换成 Flash 系列：3.6 和 3.8 Flash 的免费档每天只有约 20 次，Pro 系列不在免费档。D1 会按太平洋日期原子预占每一次请求，上限用 `GEMINI_DAILY_REQUESTS` 设置（默认 400），先在 [AI Studio 的 Rate limit 页面](https://aistudio.google.com/rate-limit) 确认你项目的实际额度。应用内上限只限制本 Worker，同一个 key 在别处的使用也会占额度。免费档的请求内容可能被 Google 用于改进模型，本站发送的都是公开新闻和行情。不要为 Gemini 启用 Google Search/Maps grounding、Batch 或其他付费工具。
 
 用 `CHAIN_TRIAGE` / `CHAIN_ANALYSIS` / `CHAIN_ANALYSIS_IMPORTANT` / `CHAIN_BRIEF` 可以改顺序，用 `OLLAMA_MODEL` 等变量可以换模型，用 `<提供商>_DAILY_REQUESTS` 可以改每日上限（如 `OLLAMA_DAILY_REQUESTS = "500"`）。
 

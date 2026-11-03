@@ -22,7 +22,10 @@ export const PROVIDERS = {
   },
   gemini: {
     label: 'Google Gemini 3.1 Flash-Lite', kind: 'gemini', keyEnv: 'GEMINI_API_KEY',
-    model: 'gemini-3.1-flash-lite', modelEnv: 'GEMINI_MODEL', caps: { requests: 10 },
+    // 免费档按 Google Cloud 项目和模型计额度，太平洋时间零点重置。截至 2026-10 的公开资料：
+    //   3.1 / 3.5 Flash-Lite 约 10 次/分钟、500 次/天；3.6 / 3.8 Flash 只有约 20 次/天；Pro 系列不在免费档。
+    // 默认每天 400 次（给 500 留余量），实际额度以 AI Studio 的 Rate limit 页面为准，用 GEMINI_DAILY_REQUESTS 调整。
+    model: 'gemini-3.1-flash-lite', modelEnv: 'GEMINI_MODEL', caps: { requests: 400 },
   },
   'groq-fast': {
     label: 'Groq Llama 3.1 8B', kind: 'openai', url: 'https://api.groq.com/openai/v1/chat/completions',
@@ -67,15 +70,16 @@ export const PROVIDERS = {
 export const DEFAULT_CHAINS = {
   // 分诊：量大、提示短、只要 4 个字段 → 先用额度最宽的
   triage: 'workersai,groq-fast,glm,groq,opencode,openrouter,gemini,claude-haiku',
-  // 一般事件的深度分析：提示约 1 万 token、输出复杂 JSON → 先用能力强的免费模型；Groq 免费版每分钟 token 上限装不下，不放进来
-  analysis: 'ollama,glm,opencode,workersai,openrouter,gemini,claude-haiku',
+  // 一般事件的深度分析：提示约 1 万 token、输出复杂 JSON → 先用能力强的免费模型；Groq 免费版每分钟 token 上限装不下，不放进来。
+  // Gemini Flash-Lite 每分钟 25 万 token、原生 JSON 输出，长提示稳定，排第二
+  analysis: 'ollama,gemini,glm,opencode,workersai,openrouter,claude-haiku',
   // 重要事件（粗分 ≥4 或已判严重）：有 Anthropic key 时先用 Sonnet
-  analysis_important: 'claude-sonnet,ollama,glm,opencode,workersai,openrouter,gemini,claude-haiku',
-  // 每日品种解读：提示约 3K token，Groq 70B 装得下 → 也放进来
-  brief: 'glm,ollama,groq,opencode,workersai,openrouter,gemini,claude-haiku',
+  analysis_important: 'claude-sonnet,ollama,gemini,glm,opencode,workersai,openrouter,claude-haiku',
+  // 每日品种解读：提示约 3K token，Groq 70B 装得下 → 也放进来；12 个品种间隔 30 秒，不会碰到 Gemini 每分钟 10 次
+  brief: 'glm,gemini,ollama,groq,opencode,workersai,openrouter,claude-haiku',
   // 每小时情景解读：只在有数据发布/波动偏高/相关新闻/固定时段时调用，每天约 6–10 次，提示约 2K token
   // → 先用响应快的 Groq；Workers AI 每天的免费额度留给量最大的分诊，放最后
-  outlook: 'groq,glm,ollama,opencode,openrouter,workersai,gemini',
+  outlook: 'groq,gemini,glm,ollama,opencode,openrouter,workersai',
 };
 
 export function chainFor(env, task) {
@@ -210,6 +214,18 @@ class ProviderError extends Error {
   }
 }
 
+async function geminiJson(url, init, timeoutMs) {
+  const res = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) {
+    const text = await res.text();
+    const r = geminiRetry(res.status, text);
+    const err = new ProviderError(`HTTP ${res.status}${r?.daily ? '（今日免费额度已用完）' : ''}: ${text.slice(0, 200)}`, { status: res.status, retryAfter: r?.retryAfter ?? null });
+    err.longCooldown = !!r?.daily;
+    throw err;
+  }
+  return res.json();
+}
+
 async function httpJson(url, init, timeoutMs) {
   const res = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) {
@@ -242,9 +258,34 @@ async function callOpenAI(env, id, { system, user, schema, maxTokens, model: mod
   };
 }
 
+/** 距下一个太平洋时间零点的秒数（Gemini 每日额度在这时重置） */
+export function secondsToPacificMidnight(nowMs = Date.now()) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
+    .formatToParts(new Date(nowMs)).map((x) => [x.type, Number(x.value)]));
+  return 86400 - (p.hour * 3600 + p.minute * 60 + p.second) + 60;
+}
+
+/**
+ * Gemini 的 429 没有 Retry-After 头，原因写在响应体里：
+ *   QuotaFailure.violations[].quotaId 含 "PerDay" → 当天额度用完，冷却到太平洋时间零点；
+ *   否则是每分钟限流，按 RetryInfo.retryDelay（如 "37s"）冷却，没有就等 60 秒。
+ */
+export function geminiRetry(status, bodyText, nowMs = Date.now()) {
+  if (status !== 429) return null;
+  let details = [];
+  try {
+    details = JSON.parse(bodyText)?.error?.details || [];
+  } catch {}
+  const perDay = details.some((d) => (d.violations || []).some((v) => /PerDay/i.test(v.quotaId || ''))) || /PerDay/i.test(bodyText);
+  if (perDay) return { retryAfter: secondsToPacificMidnight(nowMs), daily: true };
+  const delay = details.map((d) => d.retryDelay).find(Boolean);
+  const sec = delay ? Math.ceil(parseFloat(delay)) : 60;
+  return { retryAfter: Math.max(10, Math.min(sec, 600)), daily: false };
+}
+
 async function callGemini(env, id, { system, user, schema, maxTokens, model: modelOverride }) {
   const model = modelOverride || configuredModelOf(env, id);
-  const data = await httpJson(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+  const data = await geminiJson(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
     body: JSON.stringify({
@@ -352,7 +393,7 @@ function capsOf(env, id) {
   const k = id.toUpperCase().replace(/-/g, '_');
   return {
     requests: id === 'gemini'
-      ? Math.max(0, Math.floor(Math.min(p.caps.requests, num(env[`${k}_DAILY_REQUESTS`], p.caps.requests))))
+      ? Math.max(0, Math.floor(num(env[`${k}_DAILY_REQUESTS`], p.caps.requests)))
       : num(env[`${k}_DAILY_REQUESTS`], p.caps.requests ?? Infinity),
     tokens: num(env[`${k}_DAILY_TOKENS`], p.caps.tokens ?? Infinity),
     neurons: num(env[`${k}_DAILY_NEURONS`], p.caps.neurons ?? Infinity),
@@ -388,7 +429,7 @@ async function setCooldown(env, id, seconds, error) {
 }
 
 function cooldownFor(err) {
-  if (err.retryAfter) return Math.min(err.retryAfter, 3600);
+  if (err.retryAfter) return Math.min(err.retryAfter, err.longCooldown ? 26 * 3600 : 3600); // 每日额度用完可以冷却到次日重置
   if (err.status === 401 || err.status === 403) return 6 * 3600; // key 无效：别反复撞
   if (err.status === 402) return 6 * 3600; // 余额问题
   if (err.status === 429) return 600;

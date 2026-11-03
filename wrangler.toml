@@ -43,13 +43,13 @@ AI_GATEWAY_ID = "default"                # Workers AI 经 AI Gateway 调用，�
 WORKERSAI_DAILY_REQUESTS = "100"           # 每天最多 100 次优先走 Qwen；其余模型只作故障/额度回退
 GROQ_DAILY_REQUESTS = "1000"
 OPENROUTER_DAILY_REQUESTS = "45"           # 免费 50 次留 5 次余量
-GEMINI_DAILY_REQUESTS = "10"               # Gemini 免费模型保守限制为每天最多 10 次
-# 所有任务都先走 Workers AI Qwen 3 30B，再按免费额度回退：
+GEMINI_DAILY_REQUESTS = "400"              # gemini-3.1-flash-lite 免费档约 500 次/天（以 AI Studio 显示为准），留余量；太平洋时间零点重置
+# 分诊量最大，先走 Workers AI Qwen 3 30B；Gemini 每分钟只有 10 次，放分诊链末尾，主要用在提示长、次数少的分析、解读和情景上：
 CHAIN_TRIAGE = "workersai,glm,groq,ollama,opencode,openrouter,gemini"
-CHAIN_ANALYSIS = "workersai,glm,ollama,opencode,openrouter,gemini"
-CHAIN_ANALYSIS_IMPORTANT = "workersai,glm,ollama,opencode,openrouter,gemini"
-CHAIN_BRIEF = "glm,ollama,groq,opencode,openrouter,workersai,gemini"      # 美东 17:30 生成；Workers AI 额度白天已被分诊用完，放最后
-CHAIN_OUTLOOK = "groq,glm,ollama,opencode,openrouter,workersai,gemini"   # 每小时风险情景（只在有话可说时调用，每天约 6–10 次）
+CHAIN_ANALYSIS = "workersai,gemini,glm,ollama,opencode,openrouter"
+CHAIN_ANALYSIS_IMPORTANT = "workersai,gemini,glm,ollama,opencode,openrouter"
+CHAIN_BRIEF = "glm,gemini,ollama,groq,opencode,openrouter,workersai"      # 美东 17:30 生成；Workers AI 额度白天已被分诊用完，放最后
+CHAIN_OUTLOOK = "groq,gemini,glm,ollama,opencode,openrouter,workersai"   # 每小时风险情景（只在有话可说时调用，每天约 6–10 次）
 # 各家模型可单独覆盖：WORKERSAI_MODEL / GEMINI_MODEL / GROQ_MODEL / GLM_MODEL / OLLAMA_MODEL / OPENCODE_MODEL / OPENROUTER_MODEL
 WORKERSAI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8"
 GEMINI_MODEL = "gemini-3.1-flash-lite"
