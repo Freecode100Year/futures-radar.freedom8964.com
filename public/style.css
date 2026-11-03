@@ -359,3 +359,7 @@ i.dot.na { background: var(--line); }
 .dirbox { margin: 10px 0 4px; padding: 10px 12px; border-radius: 6px; background: var(--panel-2); display: grid; gap: 6px; font-size: 13px; }
 .dirbox p { margin: 2px 0 0; }
 table.dirt th { font-weight: 500; color: var(--muted); font-size: 12px; padding: 4px 8px 4px 0; }
+/* v0.9.1 统计参考价位 */
+table.lvt td { padding: 5px 8px; }
+table.lvt tr.lvnow td { background: color-mix(in srgb, var(--accent) 14%, transparent); border-top: 1px solid var(--accent); border-bottom: 1px solid var(--accent); }
+i.lvdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: 0; }

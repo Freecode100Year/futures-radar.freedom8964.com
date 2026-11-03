@@ -89,7 +89,7 @@ function hourlyPlaceholder() {
   return '<div id="hourlyBox"><div class="box"><h4>小时行情</h4><p class="note">加载中…</p></div></div>';
 }
 
-async function loadHourlyBox(inst) {
+async function loadHourlyBox(inst, detail = null) {
   const el = $('#hourlyBox');
   if (!el) return;
   const d = await fetchHourly(inst.key);
@@ -106,6 +106,7 @@ async function loadHourlyBox(inst) {
       <div id="hrChart" class="rx" role="img" aria-label="${esc(inst.name)} K线"></div>
       ${hourGrid(d.candles.slice(-24))}
     </div>
+    ${levelsBox(detail, o, last)}
     <div class="grid2">
       <div class="box"><h4>未来一小时风险展望 <span class="nb">不构成投资建议</span></h4>${outlookCard(o, d.session_open)}</div>
       <div class="box"><h4>区间命中记录 <span class="note">近 30 天 · 本品种</span></h4>${trackCard(tr, d.history)}${profileChart(d.hour_profile)}</div>
@@ -338,4 +339,73 @@ function dirTable(d) {
     ${row('照抄上一小时', d.naive, '最简单的对照基准')}
     ${row('随机猜', null, '')}
   </tbody></table>`;
+}
+
+// ---------------------------------------------------------------------
+// 统计参考价位：把已经算好的客观价位按价格排成一列，标出与最新价的距离。
+// 只是统计数值，不是入场、止损或目标价；页面不使用这类字眼。
+// ---------------------------------------------------------------------
+const LEVEL_KIND = {
+  range: ['本小时区间', 'var(--accent)'],
+  atr: ['日内典型波幅', 'var(--l2)'],
+  pivot: ['枢轴点', 'var(--muted)'],
+  ma: ['均线', '#9b7be0'],
+  y52: ['52 周', 'var(--l3)'],
+};
+
+function collectLevels(detail, o, lastCandle) {
+  const snap = detail?.snapshot || {};
+  const q = detail?.quote;
+  const price = q?.price ?? o?.base_price ?? lastCandle?.c ?? snap.stats?.last;
+  if (!price) return null;
+  const L = [];
+  const add = (label, value, kind, note = '') => Number.isFinite(value) && value > 0 && L.push({ label, value, kind, note });
+  if (o) {
+    add('95% 区间上沿', o.hi95, 'range', windowLabel(o));
+    add('68% 区间上沿', o.hi68, 'range', windowLabel(o));
+    add('68% 区间下沿', o.lo68, 'range', windowLabel(o));
+    add('95% 区间下沿', o.lo95, 'range', windowLabel(o));
+  }
+  const t = snap.tech;
+  const ref = q?.prev_close ?? snap.perf?.last;
+  if (t?.atr14 && ref) {
+    add('前结算 + 1×ATR', ref + t.atr14, 'atr', `ATR(14) ${fmtPrice(t.atr14)}`);
+    add('前结算 − 1×ATR', ref - t.atr14, 'atr', `ATR(14) ${fmtPrice(t.atr14)}`);
+  }
+  const pv = snap.pivots;
+  if (pv) for (const [k, lbl] of [['r2', 'R2'], ['r1', 'R1'], ['p', 'P'], ['s1', 'S1'], ['s2', 'S2']]) add(`枢轴 ${lbl}`, pv[k], 'pivot', `按 ${pv.day} 交易日高低收`);
+  if (t) {
+    add('20 日均线', t.sma20, 'ma');
+    add('50 日均线', t.sma50, 'ma');
+    add('200 日均线', t.sma200, 'ma');
+  }
+  if (snap.perf) {
+    add('52 周高点', snap.perf.hi52, 'y52');
+    add('52 周低点', snap.perf.lo52, 'y52');
+  }
+  // 距离最新价 10% 以外的价位对短线意义不大，只保留数量提示
+  const near = L.filter((x) => Math.abs(x.value / price - 1) <= 0.1);
+  return { price, priceTime: q?.market_time || o?.base_time || null, levels: near.sort((a, b) => b.value - a.value), hidden: L.length - near.length };
+}
+
+function levelsBox(detail, o, lastCandle) {
+  const r = collectLevels(detail, o, lastCandle);
+  if (!r || !r.levels.length) return '';
+  const rows = [];
+  let placed = false;
+  for (const x of r.levels) {
+    if (!placed && x.value < r.price) {
+      rows.push(`<tr class="lvnow"><td colspan="2"><b>最新价</b> <span class="note">${r.priceTime ? hhmm(r.priceTime) : ''}</span></td><td class="r mono"><b>${fmtPrice(r.price)}</b></td><td></td><td></td></tr>`);
+      placed = true;
+    }
+    const d = (x.value / r.price - 1) * 100;
+    const [kind, color] = LEVEL_KIND[x.kind];
+    rows.push(`<tr><td><i class="lvdot" style="background:${color}"></i>${esc(x.label)}</td><td class="note small">${esc(kind)}</td>
+      <td class="r mono">${fmtPrice(x.value)}</td><td class="r mono ${d > 0 ? 'up' : 'down'}">${d > 0 ? '+' : ''}${d.toFixed(2)}%</td><td class="note small">${esc(x.note)}</td></tr>`);
+  }
+  if (!placed) rows.push(`<tr class="lvnow"><td colspan="2"><b>最新价</b></td><td class="r mono"><b>${fmtPrice(r.price)}</b></td><td></td><td></td></tr>`);
+  return `<div class="box"><h4>统计参考价位 <span class="note">按价格从高到低排列，距最新价 10% 以内</span></h4>
+    <div class="tablewrap"><table class="lvt"><thead><tr><th>价位</th><th>类别</th><th class="r">价格</th><th class="r">距最新价</th><th>说明</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>
+    <p class="note small">这些都是由历史数据算出的统计数值：本小时 68%/95% 波动区间的上下沿、前一交易日结算价加减一个日均真实波幅（ATR）、经典枢轴点、均线和 52 周高低点。它们只是参考坐标，不是入场、止损或目标价，本站不提供交易建议。${r.hidden ? `另有 ${r.hidden} 个价位距最新价超过 10%，未列出。` : ''}</p>
+  </div>`;
 }

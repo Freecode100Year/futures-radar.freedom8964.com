@@ -566,7 +566,7 @@ function renderInstrument(d) {
   drawPriceChart(snap?.daily || [], inst);
   drawInstrumentTools(d);
   if (cm) drawCurveChart(snap.curve.points);
-  loadHourlyBox(inst);
+  loadHourlyBox(inst, d);
 }
 
 function drawPriceChart(daily, inst) {
