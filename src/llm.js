@@ -335,6 +335,16 @@ async function usageToday(env, id) {
   ).bind(quotaDay(id), `${id}:%`).first()) || { calls: 0, input: 0, output: 0 };
 }
 
+async function reserveGeminiRequest(env) {
+  return env.DB.prepare(
+    `INSERT INTO api_usage (day, model, purpose, calls, failures, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
+     VALUES (?, 'gemini:quota', 'reservation', 1, 0, 0, 0, 0, 0, 0)
+     ON CONFLICT(day, model, purpose) DO UPDATE SET calls = calls + 1
+       WHERE api_usage.calls < ?
+     RETURNING day, calls`,
+  ).bind(quotaDay('gemini'), capsOf(env, 'gemini').requests).first();
+}
+
 function capsOf(env, id) {
   const p = PROVIDERS[id];
   const k = id.toUpperCase().replace(/-/g, '_');
@@ -384,18 +394,18 @@ function cooldownFor(err) {
   return 0; // 400 等请求问题：不冷却，直接换下一家
 }
 
-async function record(env, id, model, purpose, usage, ok) {
+async function record(env, id, model, purpose, usage, ok, reservation = null) {
   const p = PROVIDERS[id];
   const cost = p.paid ? costOf(model, { input_tokens: usage.input, output_tokens: usage.output, cache_read_input_tokens: usage.cacheRead, cache_creation_input_tokens: usage.cacheWrite }) : 0;
   try {
     await env.DB.prepare(
       `INSERT INTO api_usage (day, model, purpose, calls, failures, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
-       VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(day, model, purpose) DO UPDATE SET calls = calls + 1, failures = failures + excluded.failures,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(day, model, purpose) DO UPDATE SET calls = calls + excluded.calls, failures = failures + excluded.failures,
          input_tokens = input_tokens + excluded.input_tokens, output_tokens = output_tokens + excluded.output_tokens,
          cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens, cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
          cost_usd = cost_usd + excluded.cost_usd`,
-    ).bind(quotaDay(id), `${id}:${model}`, purpose, ok ? 0 : 1, usage.input || 0, usage.output || 0, usage.cacheRead || 0, usage.cacheWrite || 0, cost).run();
+    ).bind(reservation?.day || quotaDay(id), `${id}:${model}`, purpose, reservation ? 0 : 1, ok ? 0 : 1, usage.input || 0, usage.output || 0, usage.cacheRead || 0, usage.cacheWrite || 0, cost).run();
   } catch (e) {
     console.error('record usage', e);
   }
@@ -493,11 +503,16 @@ export async function generate(env, { chain, purpose, system, user, schema, maxT
     let userMsg = user;
     const tries = p.kind === 'anthropic' || p.noRepair ? 1 : 2; // 第二次把校验错误发回去让模型修正
     for (let t = 0; t < tries; t++) {
+      const reservation = id === 'gemini' ? await reserveGeminiRequest(env) : null;
+      if (id === 'gemini' && !reservation) {
+        attempts.push({ provider: id, skipped: '今日额度已被并发请求占用或用完' });
+        break;
+      }
       let res;
       try {
         res = await CALLERS[p.kind](env, id, { system, user: userMsg, schema, maxTokens, toolName, model: selectedModel });
       } catch (err) {
-        await record(env, id, selectedModel, purpose, { input: 0, output: 0 }, false);
+        await record(env, id, selectedModel, purpose, { input: 0, output: 0 }, false, reservation);
         const cd = cooldownFor(err);
         if (cd) await setCooldown(env, id, cd, err.message);
         attempts.push({ provider: id, error: err.message, cooldown_s: cd });
@@ -510,7 +525,7 @@ export async function generate(env, { chain, purpose, system, user, schema, maxT
       } catch (e) {
         errors = [e.message];
       }
-      await record(env, id, res.model, purpose, res.usage, !!parsed);
+      await record(env, id, res.model, purpose, res.usage, !!parsed, reservation);
       if (parsed) {
         attempts.push({ provider: id, ok: true, repaired: t > 0 });
         return { data: parsed, provider: id, model: `${id}:${res.model}`, attempts };
@@ -535,11 +550,18 @@ export async function selfTest(env) {
     }
     const t0 = Date.now();
     const model = await selectedModelOf(env, id);
+    const reservation = id === 'gemini' ? await reserveGeminiRequest(env) : null;
+    if (id === 'gemini' && !reservation) {
+      out.push({ provider: id, label: PROVIDERS[id].label, model, status: '今日额度已用完' });
+      continue;
+    }
     try {
       const r = await CALLERS[PROVIDERS[id].kind](env, id, { system: '你是测试助手。', user: '3+4 等于几？把结果填进 answer，ok 填 true。', schema, maxTokens: 200, toolName: 'answer', model });
       const v = sanitize(schema, r.data ?? extractJson(r.text), '$', []);
+      if (id === 'gemini') await record(env, id, r.model, 'healthcheck', r.usage, !!v, reservation);
       out.push({ provider: id, label: PROVIDERS[id].label, model: r.model, status: v?.answer === 7 ? '正常' : '能连通但输出不对', ms: Date.now() - t0, sample: v });
     } catch (e) {
+      if (id === 'gemini') await record(env, id, model, 'healthcheck', { input: 0, output: 0 }, false, reservation);
       out.push({ provider: id, label: PROVIDERS[id].label, model, status: '失败', ms: Date.now() - t0, error: e.message });
     }
   }

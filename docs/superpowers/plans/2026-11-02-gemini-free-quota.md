@@ -14,13 +14,14 @@
 
 - Never write the Gemini API key into tracked files, command output, or Git history.
 - Use `gemini-3.1-flash-lite`; do not use grounding, batch, or paid-only features.
-- Gemini request cap is exactly 10 per UTC day in the Worker configuration.
+- Gemini request cap is at most 10 per America/Los_Angeles calendar day and cannot be raised by configuration.
+- Every Gemini request path reserves a slot atomically in D1 immediately before dispatch.
 - Do not run costly Gemini inference during deployment verification.
 
 ## Review Focus
 
 - Missing key: Gemini must be skipped without an external request.
-- Daily cap reached: no further Gemini request is made.
+- Daily cap reached or a reservation fails: no further Gemini request is made.
 - Invalid or rate-limited response: existing fallback chain continues and cooldown is persisted.
 - Non-text/empty response: existing JSON validation rejects it and falls back.
 - Externally used key: the Worker cap does not constrain use outside this Worker; Google project billing/tier remains an account-level setting.
@@ -53,6 +54,7 @@
 - Produces: provider id `gemini`, environment secret `GEMINI_API_KEY`, model environment `GEMINI_MODEL`, cap variable `GEMINI_DAILY_REQUESTS` defaulting to `10`.
 
 - [ ] Add the provider and an HTTP caller for `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`, passing the existing system/user prompt, JSON schema, and output token limit; parse candidate text and usage metadata into the existing `{ data, model, usage }` contract.
+- [ ] Atomically reserve one Pacific-day quota slot before every HTTP call, including generation retries and self-test; carry the reserved quota day to usage accounting.
 - [ ] Add Gemini after Workers AI in default analysis/triage/brief/outlook chains where upstream chain overrides do not exclude it; configure production cap to `10`.
 - [ ] Add `GEMINI_API_KEY` to the secret helper and document provider, free model, cap, and limitation that the cap only governs this Worker.
 

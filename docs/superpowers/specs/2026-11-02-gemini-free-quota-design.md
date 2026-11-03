@@ -7,7 +7,7 @@
 ## 目标与边界
 
 - API key 仅作为 Cloudflare Worker secret 存储，不能进入源码、配置文件或 Git 历史。
-- 在 D1 现有调用记账基础上实施 Gemini 每日 10 次上限；达到上限时路由跳过该提供商。
+- 在 D1 通过原子预占实现 Gemini 每日 10 次上限，按 Google API 配额使用的太平洋日期重置；正常调用、结构修复重试和连通性自检全部计入。
 - 选择 Google 当前标示为免费档的 `gemini-3.1-flash-lite` 文本模型，不启用付费模型、Grounding 或其他收费功能。
 - 将本地 `main` 快进到 `origin/main`，按 README 应用新版本所需的 D1 迁移，再部署 Worker。
 - Gemini 项目计费层状态无法从仓库或 Cloudflare 验证；应用侧上限只约束本 Worker，不约束同一 key 的外部使用。
@@ -22,13 +22,13 @@
 
 - 新 provider 通过 Gemini REST `generateContent` 接口调用，并接入现有 JSON 解析、错误冷却和 usage 记录机制。
 - 默认模型为可配置的 `gemini-3.1-flash-lite`；Gemini 路由放在现有免费提供商之后，以减少额外调用。
-- provider 每日请求上限默认为 10，并支持与现有 provider 一致的环境变量覆盖；生产配置明确写入 10。
+- provider 硬上限为每个太平洋日期 10 次；配置只允许降低上限，不能提高；每个实际 HTTP 请求开始前原子预占额度，预占失败则不调用 Gemini。
 - 新增 Gemini API key secret 名为 `GEMINI_API_KEY`。鉴于原 key 已出现在对话中，部署前优先使用轮换后的 key；若没有新 key，则先部署代码和上限配置，但不注入旧 key，Gemini 保持未启用。
 - 更新 README 的提供商、密钥和配额说明。
 
 ## 验收
 
 - 没有 Gemini key 时 provider 被跳过。
-- 请求总数达到 10 后不再向 Gemini 发请求。
+- 同时请求、修复重试、自检和跨午夜请求都不会绕过每个太平洋日期 10 次的原子上限。
 - Gemini 成功响应可按现有 schema 处理并写入调用记录；失败时现有路由能降级到下一个 provider。
 - 生产 Worker 使用 secret 注入 key，部署到最新 `main`，并有可读回验证的版本状态。
