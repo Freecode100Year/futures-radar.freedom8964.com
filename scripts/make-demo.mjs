@@ -371,6 +371,25 @@ for (const inst of INSTRUMENTS) {
     history: hist.reverse(), hour_profile: stats ? Object.entries(stats.hour).map(([h, v]) => ({ hour: Number(h), sigma_pct: +(v.sigma * 100).toFixed(4), n: v.n })) : [],
     track: { days: 30, target68: 0.683, target95: 0.954, overall: {}, by_instrument: [tr] } };
 }
+// 5 分钟K线（演示）：在最近 24 根小时K线内部用布朗桥插值，首尾与小时K线的开收盘一致
+const intradayDemo = {};
+for (const inst of INSTRUMENTS) {
+  const hs = hourlyDemo[inst.key].candles.slice(-24);
+  const out = [];
+  for (const h of hs) {
+    const sig = Math.abs(Math.log(h.h / h.l)) / 4 || 0.0005;
+    let path = [Math.log(h.o)];
+    for (let k = 1; k <= 12; k++) path.push(path[k - 1] + gauss() * sig);
+    const drift = (Math.log(h.c) - path[12]) / 12;
+    path = path.map((v, k) => v + drift * k);
+    for (let k = 0; k < 12; k++) {
+      const o = Math.exp(path[k]), c = Math.exp(path[k + 1]);
+      out.push({ t: h.t + k * 300, o: +o.toFixed(6), h: +(Math.max(o, c) * (1 + sig * 0.3)).toFixed(6), l: +(Math.min(o, c) * (1 - sig * 0.3)).toFixed(6), c: +c.toFixed(6), chg_pct: +((c / o - 1) * 100).toFixed(3) });
+    }
+  }
+  if (out.length) out.at(-1).partial = true;
+  intradayDemo[inst.key] = { instrument: inst.key, contract: curves[inst.key].active, candles: out };
+}
 const rate = (a, n) => (n ? +(a / n).toFixed(3) : null);
 const outlookTrack = { days: 30, target68: 0.683, target95: 0.954, overall: { n: tot.n, hit68: rate(tot.h68, tot.n), hit95: rate(tot.h95, tot.n) }, by_instrument: trackBy };
 const outlook = { now: iso(NOW), window_start: iso(Math.floor(olNow / H) * H), commentary_model: 'groq（演示）', instruments: INSTRUMENTS.map((i) => olRows[i.key]), track: outlookTrack };
@@ -386,7 +405,7 @@ const overview = {
   top_events: events.filter((e) => e.status === 'analyzed').sort((a, b) => b.severity - a.severity).map((e) => ({ id: e.id, title: e.title, severity: e.severity, level: e.level, sectors: e.sectors, last_updated_at: e.last_updated_at })),
 };
 
-writeFileSync(new URL('../public/demo.json', import.meta.url), JSON.stringify({ events, details, calibration, instruments, instrumentDetails, overview, outlook, hourly: hourlyDemo }));
+writeFileSync(new URL('../public/demo.json', import.meta.url), JSON.stringify({ events, details, calibration, instruments, instrumentDetails, overview, outlook, hourly: hourlyDemo, intraday: intradayDemo }));
 for (const d of Object.values(details)) if (d.event.market) console.log(d.event.id, d.event.title_zh, 'model', d.event.market.model_score, '→', d.event.market.blended_score, d.event.market.instruments.map((r) => `${r.key}:${r.z}:${r.verdict}`).join(' '));
 console.log('一小时区间（演示回测）', outlookTrack.overall);
 console.log(instruments.map((i) => `${i.key} ${i.contract} ${i.stats.last.toFixed(2)} ${i.structure}`).join('\n'));

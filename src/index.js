@@ -7,7 +7,12 @@ import { updateCurves, updateDailyBars } from './contracts.js';
 import { computeSnapshots, generateBrief, listInstruments, getInstrument, getOverview, ensureHistory, dataStatus } from './futures.js';
 import { updateCot } from './cot.js';
 import { upcomingEvents, addEvent } from './calendar.js';
+import { etParts } from './sessions.js';
+import { updateQuotes, purgeQuotes, intradayCandles, latestQuotes } from './quotes.js';
 import { makeOutlooks, evaluateOutlooks, getOutlook, getHourly, outlookTrack, generateOutlookCommentary } from './outlook.js';
+
+// 按美东时间安排的任务（"HH:MM" → 当天第几分钟）
+const SCHEDULE = Object.fromEntries(['05:00', '16:00', '16:50', '17:05', '17:10', '17:15', '17:20', '17:25', '17:30'].map((k) => [k, Number(k.slice(0, 2)) * 60 + Number(k.slice(3))]));
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -103,6 +108,13 @@ export default {
         const days = Math.min(Math.max(Number(url.searchParams.get('days') || 30), 1), 180);
         return json(await outlookTrack(env, { days }));
       }
+      const qm = path.match(/^\/api\/instruments\/([a-z0-9]+)\/intraday$/);
+      if (req.method === 'GET' && qm) {
+        if (!INSTRUMENTS.some((i) => i.key === qm[1])) return json({ error: 'not found' }, 404);
+        const hours = Math.min(Math.max(Number(url.searchParams.get('hours') || 24), 1), 120);
+        return json({ instrument: qm[1], ...(await intradayCandles(env, qm[1], { hours })), quote: (await latestQuotes(env))[qm[1]] || null });
+      }
+      if (req.method === 'GET' && path === '/api/quotes') return json(await latestQuotes(env));
       const hm = path.match(/^\/api\/instruments\/([a-z0-9]+)\/hourly$/);
       if (req.method === 'GET' && hm) {
         const data = await getHourly(env, hm[1], { hours: Number(url.searchParams.get('hours') || 72) });
@@ -175,6 +187,7 @@ export default {
         if (path === '/api/admin/ingest') return json(await ingest(env));
         if (path === '/api/admin/market/backfill') return json(await fetchMarket(env, { backfill: true }));
         if (path === '/api/admin/market/fetch') return json(await fetchMarket(env));
+        if (path === '/api/admin/quotes') return json(await updateQuotes(env));
         if (path === '/api/admin/calibrate') return json(await calibrateEvents(env));
         if (path === '/api/admin/curves') return json({ curves: await updateCurves(env), snapshots: await computeSnapshots(env) });
         if (path === '/api/admin/snapshots') return json(await computeSnapshots(env));
@@ -194,15 +207,18 @@ export default {
     }
   },
 
-  // Cron（每 15 分钟）：采集新闻、调度分析、错峰采集行情；每小时一次重新校准市场反应
-  // Cron（每 15 分钟）。每一步单独 try/catch：某一步失败（例如行情源限流）不会让后面的步骤被跳过
+  // Cron 每 5 分钟。每一步单独 try/catch：某一步失败（例如行情源限流）不会让后面的步骤被跳过。
+  // 与收盘相关的任务按美东时间安排（自动处理夏令时），见 SCHEDULE。
   async scheduled(controller, env, ctx) {
     const t = new Date(controller.scheduledTime || Date.now());
-    const group = Math.floor(t.getUTCMinutes() / 15) % 4;
-    const h = t.getUTCHours();
-    const wd = t.getUTCDay();
-    const log = { cron: controller.cron, group, errors: {} };
-    const LOGGED = new Set(['market', 'curves', 'daily', 'cot', 'ensure_history', 'snapshots', 'outlook', 'outlook_eval']);
+    const nowSec = Math.floor(t.getTime() / 1000);
+    const minute = t.getUTCMinutes();
+    const group = Math.floor(minute / 15) % 4;
+    const et = etParts(t); // { day: 0=周日, minute: 当天第几分钟 }
+    const etAt = (hhmm) => et.minute === SCHEDULE[hhmm];
+    const weekday = et.day >= 1 && et.day <= 5;
+    const log = { cron: controller.cron, group, et: `${et.day}/${Math.floor(et.minute / 60)}:${String(et.minute % 60).padStart(2, '0')}`, errors: {} };
+    const LOGGED = new Set(['quotes', 'market', 'curves', 'daily', 'cot', 'ensure_history', 'snapshots', 'outlook', 'outlook_eval', 'brief_queue']);
     const record = async (name, ok, detail) => {
       if (!LOGGED.has(name)) return;
       try {
@@ -223,7 +239,42 @@ export default {
       }
     };
 
-    if (group === 0 && h === 3) log.model_health = await step('opencode_health', () => checkOpencodeModel(env));
+    // ---- 每 5 分钟：全部品种的最新报价和 5 分钟K线（12 次请求）----
+    const q = await step('quotes', () => updateQuotes(env, { nowSec }));
+    log.quote_errors = (q || []).filter((x) => x.error);
+
+    // ---- 收盘后的日线流程（美东 17:00–18:00 是 CME 每日休市时段，没有新行情）----
+    // 17:05 / 17:10 / 17:15 / 17:20 分 4 组更新期限结构（主力合约）和日线，17:25 刷新快照，
+    // 17:30 起每 30 秒排一个品种的每日解读（错开发出，避免免费模型每分钟限流），18:00 夜盘开盘前完成。
+    // 周六、周日没有新的交易日，不重复生成。
+    if (weekday) {
+      for (const [k, g] of [['17:05', 0], ['17:10', 1], ['17:15', 2], ['17:20', 3]]) {
+        if (etAt(k)) {
+          await step('curves', () => updateCurves(env, { group: g }));
+          await step('daily', () => updateDailyBars(env, { group: g }));
+        }
+      }
+      if (etAt('17:25')) await step('snapshots', () => computeSnapshots(env));
+      if (etAt('17:30')) {
+        await step('brief_queue', () => env.QUEUE.sendBatch(INSTRUMENTS.map((i, k) => ({ body: { type: 'brief', key: i.key }, delaySeconds: k * 30 }))));
+      }
+    }
+    // 下午选出今晚解读要用的 OpenCode 免费模型
+    if (weekday && etAt('16:50')) log.model_health = await step('opencode_health', () => checkOpencodeModel(env));
+    // CFTC 持仓报告周五美东 15:30 发布：周五 16:00 拉一次，周一 16:00 再拉一次（补节假日延迟发布）
+    if ((et.day === 5 || et.day === 1) && etAt('16:00')) await step('cot', () => updateCot(env));
+    if (etAt('05:00')) {
+      await step('purge', () => purgeOld(env));
+      await step('purge_quotes', () => purgeQuotes(env));
+    }
+
+    // 生产环境的 scheduledTime 总是整 5 分钟；手动调用（测试）没有时间时按 15 分钟流程执行
+    if (controller.scheduledTime && minute % 15 !== 0) {
+      console.log(JSON.stringify(log));
+      return;
+    }
+
+    // ---- 每 15 分钟：新闻、事件分析、小时线、补数据 ----
     const r = await step('ingest', () => ingest(env));
     log.new_articles = r?.new_articles;
     log.analyses_queued = await step('schedule', () => scheduleAnalyses(env));
@@ -231,15 +282,7 @@ export default {
     const market = await step('market', () => fetchMarket(env, { group: group === 0 ? null : group }));
     log.market_errors = (market || []).filter((m) => m.error);
 
-    // 美国期货日盘收盘后：22 点分 4 组更新期限结构（识别主力合约）和日线增量
-    if (h === 22) {
-      await step('curves', () => updateCurves(env, { group }));
-      await step('daily', () => updateDailyBars(env, { group }));
-    }
-    // CFTC 持仓报告周五美东 15:30 发布：周六、周一 UTC 1 点各拉一次（周一用于补延迟发布）
-    if (h === 1 && group === 0 && (wd === 6 || wd === 1)) await step('cot', () => updateCot(env));
-
-    // 每 15 分钟补齐缺失的日线（每次 3 个品种，数据齐全后只是两次计数查询）；持仓报告每小时检查一次
+    // 补齐缺失的日线（每次 3 个品种，数据齐全后只是两次计数查询）；持仓报告每小时检查一次
     log.history = await step('ensure_history', () => ensureHistory(env, { checkCot: group === 3 }));
     if (group === 3) {
       log.calibrated = (await step('calibrate', () => calibrateEvents(env)))?.length;
@@ -247,17 +290,12 @@ export default {
     } else if (log.history?.changed) {
       await step('snapshots', () => computeSnapshots(env)); // 补到新数据就立即刷新，不等整点
     }
-    // 风险展望：每次都核对已结束的窗口；整点生成本小时的区间，并排队生成 AI 情景解读
-    const nowSec = Math.floor(t.getTime() / 1000);
+
+    // ---- 风险展望：每次核对已结束的窗口；整点生成本小时区间，并排队 AI 情景（是否调用模型由 generateOutlookCommentary 判断）----
     log.outlook_evaluated = (await step('outlook_eval', () => evaluateOutlooks(env, { nowSec })))?.length;
     if (group === 0) {
       const made = await step('outlook', () => makeOutlooks(env, { nowSec }));
       if ((made || []).some((m) => m.status === 'open')) await step('outlook_queue', () => env.QUEUE.send({ type: 'outlook_ai', window_start: Math.floor(nowSec / 3600) * 3600, now_sec: nowSec }));
-    }
-    if (group === 0 && h === 4) await step('purge', () => purgeOld(env));
-    if (h === 23 && group === 0) {
-      await step('snapshots_brief', () => computeSnapshots(env));
-      await step('brief_queue', () => env.QUEUE.sendBatch(INSTRUMENTS.map((i) => ({ body: { type: 'brief', key: i.key } }))));
     }
     console.log(JSON.stringify(log));
   },

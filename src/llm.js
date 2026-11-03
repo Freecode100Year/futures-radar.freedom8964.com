@@ -66,8 +66,9 @@ export const DEFAULT_CHAINS = {
   analysis_important: 'claude-sonnet,ollama,glm,opencode,workersai,openrouter,claude-haiku',
   // 每日品种解读：提示约 3K token，Groq 70B 装得下 → 也放进来
   brief: 'glm,ollama,groq,opencode,workersai,openrouter,claude-haiku',
-  // 每小时情景解读：每天约 24 次、提示约 2K token → 先用响应快的 Groq，避免占用 Workers AI 的每日额度
-  outlook: 'groq,glm,workersai,ollama,opencode,openrouter',
+  // 每小时情景解读：只在有数据发布/波动偏高/相关新闻/固定时段时调用，每天约 6–10 次，提示约 2K token
+  // → 先用响应快的 Groq；Workers AI 每天的免费额度留给量最大的分诊，放最后
+  outlook: 'groq,glm,ollama,opencode,openrouter,workersai',
 };
 
 export function chainFor(env, task) {

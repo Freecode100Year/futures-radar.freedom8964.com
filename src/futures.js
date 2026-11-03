@@ -1,3 +1,4 @@
+import { latestQuotes } from './quotes.js';
 // 品种视图：行情快照（代码计算）+ 每日 AI 行情解读（模型只做归因）
 import { INSTRUMENTS, byKey } from './instruments.js';
 import { pickContractSeries } from './market.js';
@@ -276,7 +277,7 @@ async function latestBriefs(env) {
 export async function listInstruments(env) {
   const { results } = await env.DB.prepare('SELECT instrument, updated_at, payload FROM instrument_snapshot').all();
   const snaps = Object.fromEntries(results.map((r) => [r.instrument, { ...parse(r.payload, {}), updated_at: r.updated_at }]));
-  const briefs = await latestBriefs(env);
+  const [briefs, quotes] = await Promise.all([latestBriefs(env), latestQuotes(env)]);
   return INSTRUMENTS.map((i) => {
     const s = snaps[i.key] || {};
     const b = briefs[i.key];
@@ -289,6 +290,7 @@ export async function listInstruments(env) {
       bars_source: s.bars_source || null,
       cot: s.cot ? { net: s.cot.net, net_change: s.cot.net_change, net_pct_oi: s.cot.net_pct_oi, cot_index: s.cot.cot_index, state: s.cot.state, report_date: s.cot.report_date, group: s.cot.group } : null,
       brief: b ? { day: b.day, headline: b.payload.headline, price_action: b.payload.price_action } : null,
+      quote: quotes[i.key] || null, // 每 5 分钟更新的最新价（快照每小时才刷新一次）
       updated_at: s.updated_at || null,
     };
   });
@@ -299,7 +301,7 @@ export async function getInstrument(env, key) {
   if (!inst) return null;
   const row = await env.DB.prepare('SELECT updated_at, payload FROM instrument_snapshot WHERE instrument = ?').bind(key).first();
   const b = await env.DB.prepare('SELECT * FROM market_briefs WHERE instrument = ? ORDER BY day DESC LIMIT 1').bind(key).first();
-  const [events, hits] = await Promise.all([relatedEvents(env, key, { days: 14, limit: 20 }), instrumentHitRate(env, key)]);
+  const [events, hits, quotes] = await Promise.all([relatedEvents(env, key, { days: 14, limit: 20 }), instrumentHitRate(env, key), latestQuotes(env)]);
   return {
     instrument: { key, name: inst.name, sector: inst.sector, unit: inst.unit, root: inst.root, exchange: inst.exchange, months: inst.months, spec: inst.spec, session_hours: SESSION_LABEL[inst.spec.session], cftc_code: inst.cftc.code },
     session: sessionStatus(inst.spec.session),
@@ -307,6 +309,7 @@ export async function getInstrument(env, key) {
     brief: b ? { day: b.day, created_at: b.created_at, model: b.model, ...parse(b.payload, {}) } : null,
     events,
     hit_rate: hits,
+    quote: quotes[key] || null,
   };
 }
 

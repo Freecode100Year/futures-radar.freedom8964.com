@@ -6,6 +6,9 @@ const OUTLOOK_NOTE = '区间由近 70 天同一时段的历史波动率估算（
 async function fetchOutlook() {
   return (await api('/api/outlook')) || (await loadDemo()).outlook || null;
 }
+async function fetchIntraday(key) {
+  return (await api(`/api/instruments/${encodeURIComponent(key)}/intraday?hours=24`)) || (await loadDemo()).intraday?.[key] || null;
+}
 async function fetchHourly(key) {
   return (await api(`/api/instruments/${encodeURIComponent(key)}/hourly?hours=72`)) || (await loadDemo()).hourly?.[key] || null;
 }
@@ -80,15 +83,36 @@ async function loadHourlyBox(inst) {
   const o = d.current;
   const last = d.candles.at(-1);
   const tr = d.track?.by_instrument?.[0];
-  el.innerHTML = `<div class="box"><h4>小时K线 <span class="note">近 72 小时 · 合约 ${esc(d.contract || '—')} · 右侧阴影为本小时 68%/95% 统计区间</span></h4>
-      <div id="hrChart" class="rx" role="img" aria-label="${esc(inst.name)} 小时K线"></div>
+  el.innerHTML = `<div class="box"><h4><span id="tfTitle">小时K线</span> <span class="note" id="tfNote"></span>
+        <span class="tfsw" role="tablist"><button data-tf="5m">5 分钟</button><button data-tf="1h" class="on">1 小时</button></span></h4>
+      <div id="hrChart" class="rx" role="img" aria-label="${esc(inst.name)} K线"></div>
       ${hourGrid(d.candles.slice(-24))}
     </div>
     <div class="grid2">
       <div class="box"><h4>未来一小时风险展望 <span class="nb">不构成投资建议</span></h4>${outlookCard(o, d.session_open)}</div>
       <div class="box"><h4>区间命中记录 <span class="note">近 30 天 · 本品种</span></h4>${trackCard(tr, d.history)}${profileChart(d.hour_profile)}</div>
     </div>`;
-  drawCandles($('#hrChart'), d.candles, o, inst, last);
+  const show = async (tf) => {
+    document.querySelectorAll('.tfsw button').forEach((b) => b.classList.toggle('on', b.dataset.tf === tf));
+    if (tf === '1h') {
+      $('#tfTitle').textContent = '小时K线';
+      $('#tfNote').textContent = `近 72 小时 · 合约 ${d.contract || '—'} · 右侧阴影为本小时 68%/95% 统计区间`;
+      return drawCandles($('#hrChart'), d.candles, o, inst, '1h');
+    }
+    $('#tfTitle').textContent = '5 分钟K线';
+    $('#tfNote').textContent = '加载中…';
+    const m = await fetchIntraday(inst.key);
+    if (state.inst !== inst.key) return;
+    if (!m?.candles?.length) {
+      $('#tfNote').textContent = '';
+      $('#hrChart').innerHTML = '<p class="note">暂无 5 分钟数据（部署后每 5 分钟开始累积，保留 7 天）。</p>';
+      return;
+    }
+    $('#tfNote').textContent = `近 24 小时 · 合约 ${m.contract || '—'} · 每 5 分钟更新，交易所延迟 10–30 分钟`;
+    drawCandles($('#hrChart'), m.candles, o, inst, '5m');
+  };
+  document.querySelectorAll('.tfsw button').forEach((b) => b.addEventListener('click', () => show(b.dataset.tf)));
+  show('1h');
 }
 
 function hourGrid(cs) {
@@ -114,7 +138,7 @@ function outlookCard(o, open) {
       <div class="sc up"><b>上行情景</b>${esc(ai.upside)}</div>
       <div class="sc down"><b>下行情景</b>${esc(ai.downside)}</div>
       <p><span class="note">本小时关注：</span>${esc(ai.watch)}</p>
-    </div>` : '<p class="note">AI 情景解读生成中或本小时未生成。</p>'}
+    </div>` : '<p class="note">本小时没有 AI 情景。为了让解读有内容，AI 只在以下情况撰写：本小时有数据发布、近 24 小时波动偏高、有相关新闻，以及每天两个固定时段（美东 18:00 夜盘开盘、9:00 美股开盘前）。统计区间每小时都会更新。</p>'}
     <p class="note small">${OUTLOOK_NOTE} 情景由 AI 根据行情和新闻撰写，两个方向都会列出，不判断哪个更可能发生。</p>
   </div>`;
 }
@@ -135,7 +159,7 @@ function profileChart(prof) {
   return `<h5>各时段典型波动 <span class="note">美东时间 · 1 小时标准差</span></h5><div class="prof">${prof.map((p) => `<div title="${p.hour}:00 ET · ${p.sigma_pct.toFixed(3)}% · ${p.n} 个样本"><b style="height:${Math.max(2, (p.sigma_pct / max) * 100)}%;opacity:${p.n ? 1 : 0.35}"></b><span>${p.hour % 6 === 0 ? p.hour : ''}</span></div>`).join('')}</div>`;
 }
 
-function drawCandles(box, cs, o, inst) {
+function drawCandles(box, cs, o, inst, tf = '1h') {
   if (!box || cs.length < 2) return;
   const W = Math.max(320, box.clientWidth), H = 230, L = 60, R = 12, T = 10, B = 24;
   const extra = o ? 3 : 0; // 右侧留出展望区间的位置
@@ -150,11 +174,14 @@ function drawCandles(box, cs, o, inst) {
   const bw = Math.max(1.5, Math.min(9, step * 0.65));
   let svg = `<svg width="${W}" height="${H}">`;
   for (const t of niceTicks(lo, hi, 4)) svg += `<line x1="${L}" x2="${W - R}" y1="${Y(t)}" y2="${Y(t)}" class="grid"/><text x="${L - 6}" y="${Y(t) + 4}" class="ax" text-anchor="end">${fmtPrice(t)}</text>`;
-  // 日期分隔与标签（本地时间每天 0 点）
+  // 时间轴：小时K线在每天 0 点（本地时间）画分隔线并标日期；5 分钟K线每 2 小时标一次时刻
   cs.forEach((c, i) => {
     const d = new Date(c.t * 1000);
-    if (i > 0 && d.getDate() !== new Date(cs[i - 1].t * 1000).getDate()) {
-      svg += `<line x1="${X(i) - step / 2}" x2="${X(i) - step / 2}" y1="${T}" y2="${H - B}" class="grid"/><text x="${X(i) - step / 2 + 3}" y="${H - 6}" class="ax">${d.getMonth() + 1}/${d.getDate()}</text>`;
+    const newDay = i > 0 && d.getDate() !== new Date(cs[i - 1].t * 1000).getDate();
+    if (newDay) svg += `<line x1="${X(i) - step / 2}" x2="${X(i) - step / 2}" y1="${T}" y2="${H - B}" class="grid"/>`;
+    if (tf === '1h' && newDay) svg += `<text x="${X(i) - step / 2 + 3}" y="${H - 6}" class="ax">${d.getMonth() + 1}/${d.getDate()}</text>`;
+    if (tf === '5m' && d.getMinutes() === 0 && d.getHours() % 2 === 0 && X(i) > L + 20 && X(i) < W - R - 20) {
+      svg += `<text x="${X(i)}" y="${H - 6}" class="ax" text-anchor="middle">${newDay || d.getHours() === 0 ? `${d.getMonth() + 1}/${d.getDate()} ` : ''}${String(d.getHours()).padStart(2, '0')}:00</text>`;
     }
   });
   if (o) {
@@ -206,4 +233,48 @@ async function outlookTrackHtml() {
     </tbody></table>
     <p class="note">每个整点为开盘品种生成本小时的统计区间，窗口结束、延迟行情到达后自动用实际价格核对。越界次数明显偏向一侧，说明这段时间有单边行情，而不是区间算错。样本少于 100 次时比例波动较大。</p>
   </div>`;
+}
+
+// ---------------------------------------------------------------------
+// 最新价：后台每 5 分钟抓一次，页面每分钟检查一次，有新报价就原地更新数字（不重绘页面）
+// ---------------------------------------------------------------------
+function quoteTimeText(list) {
+  const ts = (list || []).map((i) => i.quote?.updated_at).filter(Boolean).sort();
+  return ts.length ? `本站更新于 ${hhmm(ts.at(-1))}` : '等待首次更新';
+}
+
+async function refreshQuotes() {
+  if (document.hidden || state.demo) return;
+  const qs = await api('/api/quotes');
+  if (!qs || !Object.keys(qs).length) return;
+  for (const [key, q] of Object.entries(qs)) {
+    document.querySelectorAll(`[data-qp="${key}"]`).forEach((el) => {
+      const txt = fmtPrice(q.price);
+      if (el.textContent !== txt) {
+        el.textContent = txt;
+        el.classList.remove('flash');
+        void el.offsetWidth; // 重新触发闪烁动画
+        el.classList.add('flash');
+      }
+    });
+    document.querySelectorAll(`[data-qc="${key}"]`).forEach((el) => {
+      el.textContent = sign(q.chg_pct) + (el.dataset.qsuffix || '');
+      el.classList.remove('up', 'down', 'flat');
+      if (el.classList.contains('hc')) el.setAttribute('style', heat(q.chg_pct, SCALE.d1));
+      else el.classList.add(cls(q.chg_pct));
+    });
+  }
+  const latest = Object.values(qs).map((q) => q.updated_at).sort().at(-1);
+  document.querySelectorAll('[data-qt]').forEach((el) => {
+    el.textContent = state.view === 'overview' ? `本站更新于 ${hhmm(latest)}` : el.textContent;
+  });
+  if (state.inst && qs[state.inst]) {
+    const el = document.querySelector('.meta [data-qt]');
+    if (el) el.textContent = `行情时间 ${fmt(qs[state.inst].market_time)}`;
+  }
+}
+
+function startQuotePolling() {
+  setInterval(refreshQuotes, 60000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshQuotes(); });
 }

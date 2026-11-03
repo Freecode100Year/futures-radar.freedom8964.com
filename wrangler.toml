@@ -13,7 +13,7 @@ directory = "./public"
 binding = "ASSETS"
 
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["*/5 * * * *"]   # 每 5 分钟更新报价和 5 分钟K线；新闻、分析、校准等仍按 15 分钟/每小时运行
 
 [[d1_databases]]
 binding = "DB"
@@ -47,8 +47,8 @@ OPENROUTER_DAILY_REQUESTS = "45"           # 免费 50 次留 5 次余量
 CHAIN_TRIAGE = "workersai,glm,groq,ollama,opencode,openrouter"
 CHAIN_ANALYSIS = "workersai,glm,ollama,opencode,openrouter"
 CHAIN_ANALYSIS_IMPORTANT = "workersai,glm,ollama,opencode,openrouter"
-CHAIN_BRIEF = "workersai,glm,ollama,groq,opencode,openrouter"
-CHAIN_OUTLOOK = "groq,glm,workersai,ollama,opencode,openrouter"   # 每小时风险情景（每天约 24 次）
+CHAIN_BRIEF = "glm,ollama,groq,opencode,openrouter,workersai"      # 美东 17:30 生成；Workers AI 额度白天已被分诊用完，放最后
+CHAIN_OUTLOOK = "groq,glm,ollama,opencode,openrouter,workersai"   # 每小时风险情景（只在有话可说时调用，每天约 6–10 次）
 # 各家模型可单独覆盖：WORKERSAI_MODEL / GROQ_MODEL / GLM_MODEL / OLLAMA_MODEL / OPENCODE_MODEL / OPENROUTER_MODEL
 WORKERSAI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8"
 GROQ_MODEL = "llama-3.3-70b-versatile"

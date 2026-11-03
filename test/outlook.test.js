@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { hourlyCandles, hourStats, computeOutlook, priceTime, getOutlook, getHourly } from '../src/outlook.js';
+import { hourlyCandles, hourStats, computeOutlook, priceTime, getOutlook, getHourly, commentaryTargets } from '../src/outlook.js';
 import { byKey } from '../src/instruments.js';
 import { isOpen } from '../src/sessions.js';
 import worker from '../src/index.js';
@@ -99,7 +99,7 @@ test('风险展望：滚动回测，68%/95% 区间的命中率接近名义水平
 
 test('定时任务：整点生成展望 + AI 情景，之后自动核对，接口返回命中率', async () => {
   const env = makeEnv();
-  const t0 = Date.UTC(2030, 0, 8, 15, 0) / 1000; // 周二 10:00 ET（取未来日期，避免测试随真实时间失效）
+  const t0 = Date.UTC(2030, 0, 8, 14, 0) / 1000; // 周二 09:00 ET，美股开盘前的固定解读时段（取未来日期，避免测试随真实时间失效）
   const ins = env.DB._db.prepare('INSERT INTO prices (instrument, contract, ts, open, high, low, close) VALUES (?, ?, ?, ?, ?, ?, ?)');
   const series = {};
   for (const [i, key] of ['wti', 'gold', 'es'].entries()) {
@@ -122,6 +122,13 @@ test('定时任务：整点生成展望 + AI 情景，之后自动核对，接�
   assert.deepEqual(made, ['es', 'gold', 'wti'], '只有有数据的品种生成展望');
   await drainQueue(worker, env);
   assert.match(prompt, /68% 统计区间/);
+  assert.match(prompt, /固定时段/);
+
+  // 非固定时段、没有数据发布/高波动/新闻 → 不调用模型
+  const quiet = await commentaryTargets(env, [{ instrument: 'gold', events: '{}', regime: 1 }], { ws: t0 + 3 * H, nowSec: t0 + 3 * H });
+  assert.deepEqual(quiet.targets, []);
+  const busy = await commentaryTargets(env, [{ instrument: 'wti', events: JSON.stringify({ list: [{ title: 'EIA' }] }), regime: 1 }, { instrument: 'gold', events: '{}', regime: 1.4 }], { ws: t0 + 3 * H, nowSec: t0 + 3 * H });
+  assert.deepEqual(busy.reasons, { wti: ['数据发布'], gold: ['波动偏高'] });
 
   const ov = await getOutlook(env, { nowSec: t0 + 600 });
   const wti = ov.instruments.find((i) => i.instrument === 'wti');

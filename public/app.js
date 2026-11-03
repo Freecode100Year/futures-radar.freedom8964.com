@@ -445,7 +445,7 @@ async function renderInstrumentList() {
       <article class="irow ${state.inst === i.key ? 'sel' : ''}" data-key="${esc(i.key)}" tabindex="0">
         <div class="iname"><b>${star(i.key)}${esc(i.name)}</b><span class="note">${esc(i.contract && i.contract !== 'cont' ? i.contract : i.root)}</span></div>
         ${miniSpark(i.spark)}
-        <div class="iprice"><b>${fmtPrice(i.stats?.last)}</b><span class="${cls(i.stats?.chg_1d_pct)}">${sign(i.stats?.chg_1d_pct)}</span></div>
+        <div class="iprice"><b data-qp="${esc(i.key)}">${fmtPrice(i.quote?.price ?? i.stats?.last)}</b><span data-qc="${esc(i.key)}" class="${cls(i.quote?.chg_pct ?? i.stats?.chg_1d_pct)}">${sign(i.quote?.chg_pct ?? i.stats?.chg_1d_pct)}</span></div>
         ${i.brief ? `<p class="ihead">${esc(i.brief.headline)}</p>` : ''}
       </article>`).join(''))
     .join('') || `<div class="empty">${state.sector === '自选' ? '还没有自选品种，点击 ★ 添加' : '暂无行情数据'}</div>`;
@@ -476,9 +476,9 @@ function renderInstrument(d) {
       <h2>${star(inst.key)}${esc(inst.name)} <span class="sub2">${esc(inst.root)} · ${esc(inst.exchange)}</span></h2>
       <div class="meta"><span class="tag sec">${esc(inst.sector)}</span>
         <span>跟踪合约 ${esc(snap?.contract && snap.contract !== 'cont' ? snap.contract : '连续合约')}</span>
-        <span>单位 ${esc(inst.unit)}</span><span>行情更新 ${fmt(snap?.updated_at)}</span></div>
+        <span>单位 ${esc(inst.unit)}</span><span>最新价 <span data-qt>${d.quote ? `行情时间 ${fmt(d.quote.market_time)}` : `更新于 ${fmt(snap?.updated_at)}`}</span></span></div>
     </div>
-    <div class="big px"><div class="n">${fmtPrice(st?.last)}</div><div class="l ${cls(st?.chg_1d_pct)}">${sign(st?.chg_1d_pct)} 日</div></div>
+    <div class="big px"><div class="n" data-qp="${esc(inst.key)}">${fmtPrice(d.quote?.price ?? st?.last)}</div><div class="l ${cls(d.quote?.chg_pct ?? st?.chg_1d_pct)}" data-qc="${esc(inst.key)}" data-qsuffix=" 日">${sign(d.quote?.chg_pct ?? st?.chg_1d_pct)} 日</div></div>
   </div>
   ${st ? `<div class="tiles t4">
     ${tile('5 日', sign(st.chg_5d_pct), '', cls(st.chg_5d_pct))}
@@ -681,6 +681,7 @@ $('#list').addEventListener('keydown', (e) => {
   if ((e.key === 'Enter' || e.key === ' ') && openFromList(e.target)) e.preventDefault();
 });
 window.addEventListener('hashchange', route);
+startQuotePolling();
 
 renderChips();
 route();

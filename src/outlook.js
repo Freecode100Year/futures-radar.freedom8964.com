@@ -12,6 +12,7 @@ import { isOpen, etParts } from './sessions.js';
 import { upcomingEvents } from './calendar.js';
 import { generate, chainFor } from './llm.js';
 import { relatedEvents } from './futures.js';
+import { latestQuotes } from './quotes.js';
 
 const HOUR = 3600;
 const DAY = 86400;
@@ -141,7 +142,7 @@ function eventsFor(key, events, from, to) {
  * 计算一个品种的未来一小时展望。
  * @returns {{status:'open'|'closed'|'nodata', ...}}
  */
-export function computeOutlook(inst, rows, { nowSec, events = [], stats = hourStats(rows) }) {
+export function computeOutlook(inst, rows, { nowSec, events = [], stats = hourStats(rows), latest = null }) {
   const windowStart = Math.floor(nowSec / HOUR) * HOUR;
   const windowEnd = windowStart + HOUR;
   const session = inst.spec.session;
@@ -149,7 +150,9 @@ export function computeOutlook(inst, rows, { nowSec, events = [], stats = hourSt
   if (!openMinutes(session, windowStart, windowEnd).length) return { ...base0, status: 'closed' };
   if (!stats) return { ...base0, status: 'nodata', reason: '小时线不足 100 根' };
   const pts = rows.map((r) => ({ t: priceTime(r), close: r.close })).filter((p) => p.t <= nowSec).sort((a, b) => a.t - b.t);
-  const base = pts.at(-1);
+  let base = pts.at(-1);
+  // 每 5 分钟更新的报价比小时线新，就用它作基准价（同一合约）
+  if (latest && latest.t <= nowSec && (!base || latest.t > base.t)) base = latest;
   if (!base) return { ...base0, status: 'nodata', reason: '没有最新价格' };
 
   // 从基准价时间到窗口结束要覆盖几个小时（数据延迟 → 通常 1–2 小时），只计开盘的小时；最多 3 小时
@@ -204,11 +207,14 @@ export function computeOutlook(inst, rows, { nowSec, events = [], stats = hourSt
 /** 每整点：为所有开盘品种生成本小时的展望 */
 export async function makeOutlooks(env, { nowSec = Math.floor(Date.now() / 1000) } = {}) {
   const events = await upcomingEvents(env, { nowMs: (nowSec - 4 * HOUR) * 1000, days: 1 });
+  const quotes = await latestQuotes(env);
   const out = [];
   for (const inst of INSTRUMENTS) {
     try {
       const { contract, rows } = await loadHourly(env, inst.key, nowSec - HISTORY_DAYS * DAY);
-      const o = computeOutlook(inst, rows, { nowSec, events });
+      const q = quotes[inst.key];
+      const latest = q && q.contract === contract && q.market_time ? { t: Math.floor(Date.parse(q.market_time) / 1000), close: q.price } : null;
+      const o = computeOutlook(inst, rows, { nowSec, events, latest });
       if (o.status === 'open') {
         await env.DB.prepare(
           `INSERT OR REPLACE INTO hourly_outlook (instrument, window_start, made_at, contract, base_price, base_ts, horizon_h, sigma_pct, lo68, hi68, lo95, hi95, events, regime)
@@ -351,6 +357,36 @@ export async function getHourly(env, key, { nowSec = Math.floor(Date.now() / 100
 // AI 情景解读（每小时一次，所有开盘品种合并为一次请求）
 // ---------------------------------------------------------------------------
 
+// 只在"有话可说"时调用模型（统计区间仍每小时生成，不需要模型）：
+//   · 固定两次：美东 18:00（夜盘开盘，中文读者的早上）和 9:00（美股开盘前），所有开盘品种；
+//   · 其余整点只写满足条件的品种：本小时有数据发布、近 24 小时波动偏高（系数 ≥ 1.25）、过去 2 小时有相关的已分析事件。
+// 这样每天从约 23 次降到 6–10 次，留下来的都是有内容的。
+export const FIXED_HOURS_ET = [18, 9];
+export const HOT_REGIME = 1.25;
+
+export async function commentaryTargets(env, rows, { ws, nowSec }) {
+  const reasons = {};
+  const add = (k, why) => (reasons[k] ||= []).push(why);
+  if (FIXED_HOURS_ET.includes(etHour(ws))) for (const r of rows) add(r.instrument, '固定时段');
+  for (const r of rows) {
+    const ex = parse(r.events, {});
+    if ((ex.list || []).length) add(r.instrument, '数据发布');
+    if (r.regime >= HOT_REGIME) add(r.instrument, '波动偏高');
+  }
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT a.payload FROM events e JOIN analyses a ON a.id = (SELECT id FROM analyses WHERE event_id = e.id ORDER BY created_at DESC LIMIT 1)
+       WHERE e.status = 'analyzed' AND e.last_updated_at >= ? LIMIT 50`,
+    ).bind(new Date((nowSec - 2 * HOUR) * 1000).toISOString()).all();
+    const open = new Set(rows.map((r) => r.instrument));
+    for (const ev of results) {
+      for (const a of parse(ev.payload, {}).impact?.assets || []) if (open.has(a.instrument)) add(a.instrument, '相关新闻');
+    }
+  } catch {}
+  for (const k of Object.keys(reasons)) reasons[k] = [...new Set(reasons[k])];
+  return { targets: Object.keys(reasons), reasons };
+}
+
 export const OUTLOOK_SCHEMA = {
   type: 'object',
   properties: {
@@ -386,8 +422,11 @@ export async function generateOutlookCommentary(env, { windowStart, nowSec = Mat
   if (nowSec >= ws + HOUR - 300) return { skipped: '窗口已结束' };
   const done = await env.DB.prepare('SELECT 1 AS x FROM hourly_commentary WHERE window_start = ?').bind(ws).first();
   if (done) return { skipped: '已生成' };
-  const { results } = await env.DB.prepare('SELECT * FROM hourly_outlook WHERE window_start = ?').bind(ws).all();
-  if (!results.length) return { skipped: '没有开盘品种' };
+  const { results: all } = await env.DB.prepare('SELECT * FROM hourly_outlook WHERE window_start = ?').bind(ws).all();
+  if (!all.length) return { skipped: '没有开盘品种' };
+  const pick = await commentaryTargets(env, all, { ws, nowSec });
+  if (!pick.targets.length) return { skipped: '本小时没有需要解读的品种', reasons: pick.reasons };
+  const results = all.filter((r) => pick.targets.includes(r.instrument));
   const lines = [];
   for (const r of results) {
     const inst = byKey[r.instrument];
@@ -396,7 +435,7 @@ export async function generateOutlookCommentary(env, { windowStart, nowSec = Mat
     const c = hourlyCandles(rows, 30);
     const ago = (n) => (c.length > n ? round((c.at(-1).c / c.at(-1 - n).c - 1) * 100, 2) : null);
     const news = await relatedEvents(env, r.instrument, { days: 2, limit: 2, nowSec }).catch(() => []);
-    lines.push(`- ${r.instrument}（${inst.name}）：最新 ${r.base_price}（数据延迟约 ${ex.stale_min ?? '?'} 分钟）；近 1 小时 ${ago(1) ?? '—'}%，近 6 小时 ${ago(6) ?? '—'}%，近 24 小时 ${ago(24) ?? '—'}%；`
+    lines.push(`- ${r.instrument}（${inst.name}，关注原因：${pick.reasons[r.instrument].join('、')}）：最新 ${r.base_price}（数据延迟约 ${ex.stale_min ?? '?'} 分钟）；近 1 小时 ${ago(1) ?? '—'}%，近 6 小时 ${ago(6) ?? '—'}%，近 24 小时 ${ago(24) ?? '—'}%；`
       + `本小时 68% 统计区间 ${r.lo68}–${r.hi68}（±${ex.w68}%）；波动状态系数 ${r.regime}；`
       + `数据发布：${(ex.list || []).map((e) => e.title).join('、') || '无'}；相关新闻：${news.map((n) => `${n.title}（${n.direction}）`).join('；') || '无'}`);
   }
@@ -412,5 +451,5 @@ export async function generateOutlookCommentary(env, { windowStart, nowSec = Mat
   });
   await env.DB.prepare('INSERT OR REPLACE INTO hourly_commentary (window_start, payload, model, created_at) VALUES (?, ?, ?, ?)')
     .bind(ws, JSON.stringify({ items }), r.model, nowSec).run();
-  return { window_start: ws, model: r.model, items: items.length, dropped: (r.data.items || []).length - items.length };
+  return { window_start: ws, model: r.model, items: items.length, dropped: (r.data.items || []).length - items.length, reasons: pick.reasons };
 }
