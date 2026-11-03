@@ -69,13 +69,27 @@ export async function purgeQuotes(env, nowSec = Math.floor(Date.now() / 1000)) {
   await env.DB.prepare('DELETE FROM prices_5m WHERE ts < ?').bind(nowSec - KEEP_DAYS * 86400).run();
 }
 
-/** 全部品种的最新报价：{ key: { price, prev_close, chg_pct, market_time, updated_at, contract } } */
+/** 全部品种的最新报价：{ key: { price, prev_close, chg_pct, market_time, updated_at, contract } }。查询失败会抛错，不静默 */
 export async function latestQuotes(env) {
+  const { results } = await env.DB.prepare('SELECT * FROM quotes').all();
+  return Object.fromEntries(results.map((r) => [r.instrument, quoteOut(r)]));
+}
+
+export const QUOTE_STALE_MIN = 15; // cron 每 5 分钟；超过 15 分钟没更新说明连续 3 次失败
+
+/**
+ * 页面用：报价出问题时页面照常显示（只是没有最新价），但把状态带出去，让前端显示提示条。
+ * @returns {{ quotes, status: { ok, error, last_update, stale, count } }}
+ */
+export async function quotesWithStatus(env, nowMs = Date.now()) {
   try {
-    const { results } = await env.DB.prepare('SELECT * FROM quotes').all();
-    return Object.fromEntries(results.map((r) => [r.instrument, quoteOut(r)]));
-  } catch {
-    return {}; // 迁移 0010 未执行
+    const quotes = await latestQuotes(env);
+    const last = Object.values(quotes).map((q) => q.updated_at).sort().at(-1) || null;
+    const stale = !last || nowMs - Date.parse(last) > QUOTE_STALE_MIN * 60000;
+    const count = Object.keys(quotes).length;
+    return { quotes, status: { ok: count > 0 && !stale, error: count ? (stale ? 'quotes_stale' : null) : 'quotes_empty', last_update: last, stale, count } };
+  } catch (e) {
+    return { quotes: {}, status: { ok: false, error: 'quotes_unavailable', detail: String(e?.message || e), last_update: null, stale: true, count: 0 } };
   }
 }
 

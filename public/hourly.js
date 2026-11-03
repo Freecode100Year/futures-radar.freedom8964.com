@@ -257,6 +257,7 @@ async function refreshQuotes() {
         el.classList.add('flash');
       }
     });
+    if (q.chg_pct === null || q.chg_pct === undefined) continue; // 没有前结算价就不覆盖
     document.querySelectorAll(`[data-qc="${key}"]`).forEach((el) => {
       el.textContent = sign(q.chg_pct) + (el.dataset.qsuffix || '');
       el.classList.remove('up', 'down', 'flat');
@@ -277,4 +278,15 @@ async function refreshQuotes() {
 function startQuotePolling() {
   setInterval(refreshQuotes, 60000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshQuotes(); });
+}
+
+/** 报价异常提示条：报价表不可用、为空或超过 15 分钟没更新时显示；可关闭（本次会话内不再显示） */
+function quoteBanner(st) {
+  if (!st || st.ok || DEMO_MODE || sessionStorage.getItem('fr-quote-banner-off')) return '';
+  const why = { quotes_unavailable: '报价服务异常', quotes_empty: '报价还没有数据', quotes_stale: '报价超过 15 分钟没有更新' }[st.error] || '报价异常';
+  return `<div class="notice warnbox" id="quoteBanner">⚠ ${why}，"最新价"和"1日"列暂时不准或显示为"—"，其余周期为日线数据。
+    ${st.last_update ? `最后成功更新 ${hhmm(st.last_update)}。` : ''}
+    <a href="/api/data-status" target="_blank" rel="noopener">数据状态</a> ·
+    <button type="button" onclick="location.reload()">重试</button> ·
+    <button type="button" onclick="sessionStorage.setItem('fr-quote-banner-off','1');this.closest('#quoteBanner').remove()">关闭</button></div>`;
 }

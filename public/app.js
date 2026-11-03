@@ -29,7 +29,16 @@ const refs = (ids, sources) =>
     })
     .join('');
 
+const DEMO_MODE = new URLSearchParams(location.search).has('demo');
+// 非演示模式下接口失败时返回的空数据：页面显示"暂无数据"并给出提示条，而不是悄悄换成演示数据
+const EMPTY = { events: [], details: {}, instruments: null, instrumentDetails: {}, overview: null, calibration: null, outlook: null, hourly: {}, intraday: {} };
+
+/** 只有地址里带 ?demo=1 才用演示数据；否则返回空数据并提示哪些接口不可用 */
 async function loadDemo() {
+  if (!DEMO_MODE) {
+    showApiBanner();
+    return EMPTY;
+  }
   if (!state.demo) {
     state.demo = await (await fetch('demo.json')).json();
     $('#demoBadge').hidden = false;
@@ -37,15 +46,35 @@ async function loadDemo() {
   return state.demo;
 }
 
+const failedApis = new Set();
 async function api(path) {
-  if (new URLSearchParams(location.search).has('demo') || state.demo) return null;
+  if (DEMO_MODE) return null;
   try {
     const r = await fetch(path);
-    if (!r.ok || !(r.headers.get('content-type') || '').includes('json')) return null;
+    if (!r.ok || !(r.headers.get('content-type') || '').includes('json')) {
+      failedApis.add(`${path.split('?')[0]}（${r.status}）`);
+      return null;
+    }
     return await r.json();
   } catch {
+    failedApis.add(`${path.split('?')[0]}（网络错误）`);
     return null;
   }
+}
+
+function showApiBanner() {
+  if (!failedApis.size || sessionStorage.getItem('fr-api-banner-off')) return;
+  let el = $('#apiBanner');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'apiBanner';
+    el.className = 'gbanner';
+    document.body.prepend(el);
+  }
+  el.innerHTML = `⚠ 部分后端接口暂时不可用：${[...failedApis].slice(0, 4).map(esc).join('、')}。页面上相应的部分会显示为空。
+    <a href="/api/data-status" target="_blank" rel="noopener">查看数据状态</a> · <button type="button" data-retry>重试</button> · <button type="button" data-close>关闭</button>`;
+  el.querySelector('[data-retry]').onclick = () => location.reload();
+  el.querySelector('[data-close]').onclick = () => { sessionStorage.setItem('fr-api-banner-off', '1'); el.remove(); };
 }
 
 async function fetchEvents() {
@@ -354,6 +383,10 @@ async function showCalibration() {
   state.selected = null;
   document.querySelectorAll('.card').forEach((c) => c.classList.remove('sel'));
   const c = (await api('/api/calibration')) || (await loadDemo()).calibration;
+  if (!c) {
+    $('#detail').innerHTML = '<div class="empty">校准数据暂时不可用</div>';
+    return;
+  }
   const pct = (v) => (v === null || v === undefined ? '—' : Math.round(v * 100) + '%');
   const olTrack = await outlookTrackHtml().catch(() => '');
   $('#detail').innerHTML = `<div class="d-head"><div><h2>模型校准统计</h2><div class="meta">基于 ${c.events} 个有行情数据的事件</div></div></div>
@@ -445,7 +478,7 @@ async function renderInstrumentList() {
       <article class="irow ${state.inst === i.key ? 'sel' : ''}" data-key="${esc(i.key)}" tabindex="0">
         <div class="iname"><b>${star(i.key)}${esc(i.name)}</b><span class="note">${esc(i.contract && i.contract !== 'cont' ? i.contract : i.root)}</span></div>
         ${miniSpark(i.spark)}
-        <div class="iprice"><b data-qp="${esc(i.key)}">${fmtPrice(i.quote?.price ?? i.stats?.last)}</b><span data-qc="${esc(i.key)}" class="${cls(i.quote?.chg_pct ?? i.stats?.chg_1d_pct)}">${sign(i.quote?.chg_pct ?? i.stats?.chg_1d_pct)}</span></div>
+        <div class="iprice"><b data-qp="${esc(i.key)}">${fmtPrice(i.quote?.price ?? i.stats?.last)}</b><span data-qc="${esc(i.key)}" class="${cls(i.quote?.chg_pct)}">${sign(i.quote?.chg_pct)}</span></div>
         ${i.brief ? `<p class="ihead">${esc(i.brief.headline)}</p>` : ''}
       </article>`).join(''))
     .join('') || `<div class="empty">${state.sector === '自选' ? '还没有自选品种，点击 ★ 添加' : '暂无行情数据'}</div>`;
@@ -467,10 +500,11 @@ async function selectInstrument(key) {
 
 function renderInstrument(d) {
   const { instrument: inst, snapshot: snap, brief: b, events, hit_rate: hr } = d;
+  const qBanner = quoteBanner(d.quotes_status);
   const st = snap?.stats;
   const cm = snap?.curve?.metrics;
   const tile = (label, v, sub = '', c = '') => `<div class="tile"><span>${label}</span><b class="${c}">${v}</b><em>${sub}</em></div>`;
-  $('#detail').innerHTML = `
+  $('#detail').innerHTML = `${qBanner}
   <div class="d-head">
     <div>
       <h2>${star(inst.key)}${esc(inst.name)} <span class="sub2">${esc(inst.root)} · ${esc(inst.exchange)}</span></h2>
@@ -478,7 +512,7 @@ function renderInstrument(d) {
         <span>跟踪合约 ${esc(snap?.contract && snap.contract !== 'cont' ? snap.contract : '连续合约')}</span>
         <span>单位 ${esc(inst.unit)}</span><span>最新价 <span data-qt>${d.quote ? `行情时间 ${fmt(d.quote.market_time)}` : `更新于 ${fmt(snap?.updated_at)}`}</span></span></div>
     </div>
-    <div class="big px"><div class="n" data-qp="${esc(inst.key)}">${fmtPrice(d.quote?.price ?? st?.last)}</div><div class="l ${cls(d.quote?.chg_pct ?? st?.chg_1d_pct)}" data-qc="${esc(inst.key)}" data-qsuffix=" 日">${sign(d.quote?.chg_pct ?? st?.chg_1d_pct)} 日</div></div>
+    <div class="big px"><div class="n" data-qp="${esc(inst.key)}">${fmtPrice(d.quote?.price ?? st?.last)}</div><div class="l ${cls(d.quote?.chg_pct)}" data-qc="${esc(inst.key)}" data-qsuffix=" 日">${sign(d.quote?.chg_pct)} 日</div></div>
   </div>
   ${st ? `<div class="tiles t4">
     ${tile('5 日', sign(st.chg_5d_pct), '', cls(st.chg_5d_pct))}

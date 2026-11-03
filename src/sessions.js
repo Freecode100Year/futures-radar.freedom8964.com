@@ -33,3 +33,18 @@ export function sessionStatus(type, now = new Date()) {
   }
   return { type, open, next_change: null };
 }
+
+const _dateFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' });
+
+/**
+ * 时间戳所属的交易日（YYYY-MM-DD）。CME 每天美东 17:00 结算、18:00 开夜盘，
+ * 夜盘算作下一个交易日，所以美东 18:00 及以后归入次日。
+ * 按 UTC 日期切分会把同一个交易日从 UTC 零点（美东 19:00/20:00）切成两段。
+ */
+export function sessionDate(tsSec) {
+  const p = Object.fromEntries(_dateFmt.formatToParts(new Date(tsSec * 1000)).map((x) => [x.type, x.value]));
+  const d = `${p.year}-${p.month}-${p.day}`;
+  if (Number(p.hour) < 18) return d;
+  const n = new Date(Date.parse(`${d}T12:00:00Z`) + 86400000);
+  return n.toISOString().slice(0, 10);
+}

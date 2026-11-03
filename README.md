@@ -205,6 +205,12 @@ curl -X POST $W/api/admin/ingest   -H "$A"        # 采集一次新闻
 curl -X POST $W/api/admin/brief/brent -H "$A"     # 试生成一个品种的 AI 解读（之后每天自动生成）
 ```
 
+**自动补建表（v0.8.1 起）**：Worker 每个实例第一次处理请求或定时任务时，会检查迁移 0006–0010 新增的表和 `prices` 的开高低三列，缺了就自动补上，结果显示在 `/api/data-status` 的 `schema_guard` 里。所以漏跑这几份迁移不会再让新功能整块失效。改写数据的旧迁移（0002–0005）仍需手动执行。注意：如果开高低三列是自动补上的，之后再用 `wrangler d1 migrations apply` 执行 0009 会报"duplicate column"，这说明这一步已经完成，可以跳过。
+
+**排查与告警**：`/api/data-status` 顶部的 `ok` 是总开关，只要任何一张表不可用、5 分钟报价超过 15 分钟没更新，或者某个定时步骤最近一次有品种失败，`ok` 就是 `false`，`problems` 字段会列出原因。定时步骤只要有一个品种失败就记为失败，不再因为"没有抛异常"而记成功。报价不可用时，`/api/quotes` 返回 503，页面顶部显示提示条，"1日"列显示"—"。演示数据只在网址带 `?demo=1` 时使用，接口出错时不会再悄悄换成演示数据。
+
+**"1日"涨跌的唯一口径**：最新价 / 前一交易日结算价 − 1，来自每 5 分钟的报价。日线推算的 1 日涨跌已不再对外提供。小时线和 Yahoo 日线一律按交易日归档：美东 18:00 及以后算下一交易日，不再按 UTC 日期切分。
+
 **从 v0.7 升级到 v0.8**：执行迁移 `migrations/0010_quotes_5m.sql`（新增 `prices_5m` 和 `quotes` 两张表），然后部署；`wrangler.toml` 的定时任务已改为每 5 分钟。部署后马上执行 `curl -X POST $W/api/admin/quotes -H "$A"` 可以立即拉一次报价。
 
 **从 v0.6 升级到 v0.7**：执行迁移 `npx wrangler d1 migrations apply <库名> --remote`，或手动执行 `migrations/0009_hourly_outlook.sql`（给 `prices` 加开高低三列，新增两张展望表），然后部署。建议再执行一次 `curl -X POST $W/api/admin/market/backfill -H "$A"`，补上之前漏掉的完整小时K线。`curl -X POST $W/api/admin/outlook -H "$A"` 可以立即生成本小时的展望和 AI 情景（加 `?ai=0` 只生成区间）。

@@ -1,3 +1,4 @@
+import { sessionDate } from './sessions.js';
 // 期货合约：月份代码、候选合约、主力合约识别、期限结构
 import { INSTRUMENTS, byKey } from './instruments.js';
 
@@ -147,8 +148,12 @@ export async function activeContract(env, key) {
 // 连续合约在换月时会有价差，对日线级别的指标影响很小；事件反应计算仍然只用单一合约的小时线。
 // ---------------------------------------------------------------------------
 
-/** Yahoo 日线时间戳是交易所当地午夜，加 12 小时后取 UTC 日期即可得到交易日 */
-export const tradingDay = (ts) => new Date((ts + 12 * 3600) * 1000).toISOString().slice(0, 10);
+/**
+ * Yahoo 日线 → 交易日。完整日线的时间戳是交易所当地午夜，但当天还没收盘的那根是实时时间（如美东 16:00），
+ * 原来"加 12 小时取 UTC 日期"会把下午的实时K线算到第二天，多出一根未来日期的日线。
+ * 统一按交易时段归日：美东 18:00 及以后算下一交易日。
+ */
+export const tradingDay = (ts) => sessionDate(ts);
 
 export async function updateDailyBars(env, { group = null, keys = null, fetcher = fetchYahooBars } = {}) {
   const list = keys ? INSTRUMENTS.filter((i) => keys.includes(i.key)) : group === null ? INSTRUMENTS : INSTRUMENTS.filter((_, i) => i % 4 === group);
@@ -162,6 +167,8 @@ export async function updateDailyBars(env, { group = null, keys = null, fetcher 
       for (let i = 0; i < bars.length; i += 400) {
         await env.DB.batch(bars.slice(i, i + 400).map((b) => stmt.bind(inst.key, tradingDay(b.ts), b.open, b.high, b.low, b.close, b.volume)));
       }
+      // 清掉旧算法留下的"未来日期"日线（实时K线被算到了第二天）
+      await env.DB.prepare('DELETE FROM daily_bars WHERE instrument = ? AND day > ?').bind(inst.key, sessionDate(Math.floor(Date.now() / 1000))).run();
       report.push({ instrument: inst.key, range, bars: bars.length });
     } catch (e) {
       report.push({ instrument: inst.key, error: e.message });

@@ -1,4 +1,5 @@
-import { latestQuotes } from './quotes.js';
+import { quotesWithStatus } from './quotes.js';
+import { ensureSchema } from './schema-guard.js';
 // 品种视图：行情快照（代码计算）+ 每日 AI 行情解读（模型只做归因）
 import { INSTRUMENTS, byKey } from './instruments.js';
 import { pickContractSeries } from './market.js';
@@ -6,7 +7,7 @@ import { generate, chainFor } from './llm.js';
 import { performance, technicals, pivots, seasonality, correlationMatrix, SPREADS, spreadStats, notional } from './analytics.js';
 import { cotMetrics, COT_GROUP_LABEL, updateCot } from './cot.js';
 import { updateDailyBars, fetchYahooBars } from './contracts.js';
-import { sessionStatus, SESSION_LABEL } from './sessions.js';
+import { sessionStatus, SESSION_LABEL, sessionDate } from './sessions.js';
 import { upcomingEvents } from './calendar.js';
 
 const DAY = 86400;
@@ -23,10 +24,10 @@ const parse = (s, d = null) => {
 // 1. 行情统计（纯函数）
 // ---------------------------------------------------------------------------
 
-/** 小时K线 → 每个 UTC 日的最后一根收盘 */
+/** 小时K线 → 每个交易日（美东 18:00 起算下一交易日）的最后一根收盘 */
 export function dailyCloses(series) {
   const byDay = new Map();
-  for (const p of series) byDay.set(new Date(p.ts * 1000).toISOString().slice(0, 10), p);
+  for (const p of series) byDay.set(sessionDate(p.ts), p);
   return [...byDay.entries()].map(([day, p]) => ({ day, ts: p.ts, close: p.close }));
 }
 
@@ -51,7 +52,8 @@ export function computeStats(daily) {
   return {
     last: round(last, 4),
     last_day: daily[daily.length - 1].day,
-    chg_1d_pct: round(pct(at(1), last)),
+    // 1 日涨跌只有一个口径：最新价 / 前一交易日结算价 − 1，由每 5 分钟的报价（quotes.chg_pct）提供。
+    // 这里不再用小时线或日线推算，避免同一页面出现两个互相矛盾的数字。
     chg_5d_pct: round(pct(at(5), last)),
     chg_20d_pct: round(pct(at(20), last)),
     vol_20d_ann_pct: sd === null ? null : round(sd * Math.sqrt(252) * 100, 1),
@@ -215,7 +217,7 @@ const BRIEF_SYSTEM = `你是国际期货市场分析师，为中文读者写每�
 3. 这是市场分析，不是交易建议：不要给出买卖方向、目标价、止损或仓位建议，也不要预测具体价格。
 4. 一律用简体中文。`;
 
-function briefPrompt(inst, snap, events, hits) {
+function briefPrompt(inst, snap, events, hits, quote = null) {
   const s = snap.stats;
   const cm = snap.curve?.metrics;
   const curvePts = (snap.curve?.points || []).map((p) => `${p.contract}(${p.month}) ${p.close}`).join('，');
@@ -223,7 +225,7 @@ function briefPrompt(inst, snap, events, hits) {
     ? events.map((e) => `[E${e.id}] ${e.title}｜严重性 ${e.severity}（${e.level}）｜对本品种：${e.direction}，${e.horizon}｜${e.rationale}`).join('\n')
     : '（过去 7 天没有与本品种相关的已分析事件）';
   return `品种：${inst.name}（${inst.root}，${inst.exchange}，单位 ${inst.unit}），当前跟踪合约 ${snap.contract || '未知'}
-行情（截至 ${s.last_day}）：最新 ${s.last}；1日 ${s.chg_1d_pct}%，5日 ${s.chg_5d_pct}%，20日 ${s.chg_20d_pct}%；20日年化波动率 ${s.vol_20d_ann_pct}%；
+行情（截至 ${s.last_day}）：最新 ${quote?.price ?? s.last}；${quote?.chg_pct != null ? `较前一交易日结算 ${quote.chg_pct}%，` : ''}5日 ${s.chg_5d_pct}%，20日 ${s.chg_20d_pct}%；20日年化波动率 ${s.vol_20d_ann_pct}%；
 近3个月区间 ${s.range_3m.low}–${s.range_3m.high}，当前处于区间 ${s.range_3m.position_pct}% 位置；20日均线 ${s.ma20}，60日均线 ${s.ma60}；${s.trend}。
 期限结构：${cm ? `${cm.structure}，近月 ${cm.front} 对次月 ${cm.next} 价差 ${cm.spread_pct}%，多头展期年化 ${cm.roll_yield_ann_pct}%，曲线斜率年化 ${cm.curve_slope_ann_pct}%。各合约：${curvePts}` : '暂无数据'}
 历史上模型对本品种方向判断：命中 ${hits.hit}，相反 ${hits.miss}，不显著 ${hits.insignificant}。
@@ -239,7 +241,7 @@ export async function generateBrief(env, key, nowSec = Math.floor(Date.now() / 1
   const row = await env.DB.prepare('SELECT payload FROM instrument_snapshot WHERE instrument = ?').bind(key).first();
   const snap = parse(row?.payload);
   if (!snap?.stats) return { skipped: '行情数据不足' };
-  const [events, hits] = await Promise.all([relatedEvents(env, key, { nowSec }), instrumentHitRate(env, key)]);
+  const [events, hits, { quotes }] = await Promise.all([relatedEvents(env, key, { nowSec }), instrumentHitRate(env, key), quotesWithStatus(env)]);
 
   const r = await generate(env, {
     chain: chainFor(env, 'brief'),
@@ -248,7 +250,7 @@ export async function generateBrief(env, key, nowSec = Math.floor(Date.now() / 1
     toolName: 'market_brief',
     schema: BRIEF_SCHEMA,
     system: BRIEF_SYSTEM,
-    user: briefPrompt(inst, snap, events, hits),
+    user: briefPrompt(inst, snap, events, hits, quotes[key] || null),
   });
 
   const valid = new Set(events.map((e) => e.id));
@@ -277,7 +279,7 @@ async function latestBriefs(env) {
 export async function listInstruments(env) {
   const { results } = await env.DB.prepare('SELECT instrument, updated_at, payload FROM instrument_snapshot').all();
   const snaps = Object.fromEntries(results.map((r) => [r.instrument, { ...parse(r.payload, {}), updated_at: r.updated_at }]));
-  const [briefs, quotes] = await Promise.all([latestBriefs(env), latestQuotes(env)]);
+  const [briefs, { quotes }] = await Promise.all([latestBriefs(env), quotesWithStatus(env)]);
   return INSTRUMENTS.map((i) => {
     const s = snaps[i.key] || {};
     const b = briefs[i.key];
@@ -285,7 +287,7 @@ export async function listInstruments(env) {
       key: i.key, name: i.name, sector: i.sector, unit: i.unit, root: i.root,
       contract: s.contract || null, stats: s.stats || null, spark: (s.daily || []).slice(-30).map((d) => d[1]),
       structure: s.curve?.metrics?.structure || null, roll_yield_ann_pct: s.curve?.metrics?.roll_yield_ann_pct ?? null,
-      perf: s.perf ? { d1: s.perf.d1, w1: s.perf.w1, m1: s.perf.m1, m3: s.perf.m3, ytd: s.perf.ytd, y1: s.perf.y1, pos52: s.perf.pos52 } : null,
+      perf: s.perf ? { w1: s.perf.w1, m1: s.perf.m1, m3: s.perf.m3, ytd: s.perf.ytd, y1: s.perf.y1, pos52: s.perf.pos52 } : null,
       rsi14: s.tech?.rsi14 ?? null,
       bars_source: s.bars_source || null,
       cot: s.cot ? { net: s.cot.net, net_change: s.cot.net_change, net_pct_oi: s.cot.net_pct_oi, cot_index: s.cot.cot_index, state: s.cot.state, report_date: s.cot.report_date, group: s.cot.group } : null,
@@ -301,7 +303,7 @@ export async function getInstrument(env, key) {
   if (!inst) return null;
   const row = await env.DB.prepare('SELECT updated_at, payload FROM instrument_snapshot WHERE instrument = ?').bind(key).first();
   const b = await env.DB.prepare('SELECT * FROM market_briefs WHERE instrument = ? ORDER BY day DESC LIMIT 1').bind(key).first();
-  const [events, hits, quotes] = await Promise.all([relatedEvents(env, key, { days: 14, limit: 20 }), instrumentHitRate(env, key), latestQuotes(env)]);
+  const [events, hits, { quotes, status: quotesStatus }] = await Promise.all([relatedEvents(env, key, { days: 14, limit: 20 }), instrumentHitRate(env, key), quotesWithStatus(env)]);
   return {
     instrument: { key, name: inst.name, sector: inst.sector, unit: inst.unit, root: inst.root, exchange: inst.exchange, months: inst.months, spec: inst.spec, session_hours: SESSION_LABEL[inst.spec.session], cftc_code: inst.cftc.code },
     session: sessionStatus(inst.spec.session),
@@ -310,12 +312,13 @@ export async function getInstrument(env, key) {
     events,
     hit_rate: hits,
     quote: quotes[key] || null,
+    quotes_status: quotesStatus,
   };
 }
 
 /** 总览页：交易时段、品种表（多周期涨跌/持仓）、价差、相关性、日历、重点事件 */
 export async function getOverview(env, nowMs = Date.now()) {
-  const [instruments, ov, calendar, top] = await Promise.all([
+  const [instruments, ov, calendar, top, qs] = await Promise.all([
     listInstruments(env),
     env.DB.prepare('SELECT updated_at, payload FROM overview_snapshot WHERE id = 1').first(),
     upcomingEvents(env, { nowMs, days: 7 }),
@@ -323,6 +326,7 @@ export async function getOverview(env, nowMs = Date.now()) {
       `SELECT id, COALESCE(title_zh, title) AS title, severity, level, sectors, last_updated_at FROM events
        WHERE status = 'analyzed' AND last_updated_at >= ? ORDER BY severity DESC LIMIT 4`,
     ).bind(new Date(nowMs - 3 * 86400000).toISOString()).all(),
+    quotesWithStatus(env, nowMs),
   ]);
   const now = new Date(nowMs);
   return {
@@ -335,6 +339,7 @@ export async function getOverview(env, nowMs = Date.now()) {
     overview_updated_at: ov?.updated_at || null,
     calendar,
     top_events: top.results.map((e) => ({ ...e, sectors: parse(e.sectors, []) })),
+    quotes_status: qs.status, // 报价异常时前端显示提示条，"1日"列显示"—"
   };
 }
 
@@ -371,7 +376,8 @@ export async function dataStatus(env) {
       return { error: e.message };
     }
   };
-  const [prices, daily, cot, snaps, state, ov, cron] = await Promise.all([
+  const schema = await ensureSchema(env);
+  const [prices, daily, cot, snaps, state, ov, cron, p5, quotes, outl, comm] = await Promise.all([
     q('SELECT instrument, COUNT(*) AS bars, MAX(ts) AS last_ts FROM prices GROUP BY instrument'),
     q('SELECT instrument, COUNT(*) AS bars, MIN(day) AS first_day, MAX(day) AS last_day FROM daily_bars GROUP BY instrument'),
     q('SELECT instrument, COUNT(*) AS weeks, MAX(report_date) AS last_report FROM cot GROUP BY instrument'),
@@ -379,16 +385,38 @@ export async function dataStatus(env) {
     q('SELECT instrument, active_contract, rolled_at FROM instrument_state'),
     q('SELECT updated_at FROM overview_snapshot WHERE id = 1'),
     q('SELECT step, ran_at, ok, detail FROM cron_log ORDER BY step'),
+    q('SELECT instrument, COUNT(*) AS bars, MAX(ts) AS last_ts FROM prices_5m GROUP BY instrument'),
+    q('SELECT instrument, price, prev_close, market_time, updated_at FROM quotes'),
+    q('SELECT COUNT(*) AS n, SUM(evaluated_at IS NOT NULL) AS evaluated, MAX(window_start) AS last FROM hourly_outlook'),
+    q('SELECT COUNT(*) AS n, MAX(window_start) AS last FROM hourly_commentary'),
   ]);
   const by = (rows) => (Array.isArray(rows) ? Object.fromEntries(rows.map((r) => [r.instrument, r])) : {});
-  const P = by(prices), Dl = by(daily), C = by(cot), S = by(snaps), St = by(state);
+  const P = by(prices), Dl = by(daily), C = by(cot), S = by(snaps), St = by(state), P5 = by(p5), Q = by(quotes);
   const tableErrors = Object.fromEntries(
-    Object.entries({ prices, daily_bars: daily, cot, instrument_snapshot: snaps, instrument_state: state, overview_snapshot: ov })
+    Object.entries({ prices, daily_bars: daily, cot, instrument_snapshot: snaps, instrument_state: state, overview_snapshot: ov, cron_log: cron,
+      prices_5m: p5, quotes, hourly_outlook: outl, hourly_commentary: comm })
       .filter(([, v]) => v && !Array.isArray(v)).map(([k, v]) => [k, v.error]),
   );
+  const nowMs = Date.now();
+  const iso = (sec) => (sec ? new Date(sec * 1000).toISOString() : null);
+  const lastQuote = Array.isArray(quotes) ? Math.max(0, ...quotes.map((r) => r.updated_at)) : 0;
+  const quotesStale = !lastQuote || nowMs / 1000 - lastQuote > 15 * 60;
+  // 最近一次运行里有逐项错误的定时步骤（例如 12 个品种里有几个抓取失败）
+  const failedSteps = Array.isArray(cron) ? cron.filter((r) => !r.ok).map((r) => r.step) : [];
+  const problems = [
+    ...Object.keys(tableErrors).map((t) => `表 ${t} 不可用`),
+    ...(quotesStale ? ['5 分钟报价超过 15 分钟没有更新'] : []),
+    ...failedSteps.map((st) => `定时步骤 ${st} 最近一次有失败`),
+    ...schema.errors.map((e) => `自动建表失败：${e}`),
+  ];
   return {
-    now: new Date().toISOString(),
+    now: new Date(nowMs).toISOString(),
+    ok: problems.length === 0, // 总闸：任何一项有问题都是 false
+    problems,
     table_errors: tableErrors,
+    schema_guard: schema, // 本实例启动时自动补建的表/列
+    quotes: { last_update: iso(lastQuote), stale: quotesStale, count: Array.isArray(quotes) ? quotes.length : 0 },
+    outlook: Array.isArray(outl) ? { windows: outl[0]?.n || 0, evaluated: outl[0]?.evaluated || 0, last_window: iso(outl[0]?.last), ai_windows: Array.isArray(comm) ? comm[0]?.n || 0 : 0 } : null,
     overview_updated_at: Array.isArray(ov) ? ov[0]?.updated_at || null : null,
     // 各定时步骤最近一次的运行时间、成败和返回内容（含逐个品种的错误）
     cron_steps: Array.isArray(cron)
@@ -409,6 +437,10 @@ export async function dataStatus(env) {
       cot_last_report: C[i.key]?.last_report || null,
       cftc_code: i.cftc.code,
       snapshot_updated_at: S[i.key]?.updated_at || null,
+      bars_5m: P5[i.key]?.bars || 0,
+      last_5m: iso(P5[i.key]?.last_ts),
+      quote_price: Q[i.key]?.price ?? null,
+      quote_market_time: iso(Q[i.key]?.market_time),
     })),
   };
 }

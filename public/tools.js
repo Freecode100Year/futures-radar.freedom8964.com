@@ -79,6 +79,7 @@ async function renderOverview() {
     <div class="sessbar">${sessionChip('globex', '能源·金属·股指·国债')}${sessionChip('grains', '谷物')}</div>
     <p class="note">最新价每 5 分钟更新（<span data-qt>${quoteTimeText(ov.instruments)}</span>），本身为交易所延迟数据（10–30 分钟），不含交易所节假日；仅供研究参考，不构成投资建议。</p>
     ${historyNotice(ov)}
+    ${quoteBanner(ov.quotes_status)}
   </div>
 
   <div class="box"><h4>多周期涨跌 <span class="note">单元格颜色深浅表示涨跌幅度</span></h4>
@@ -93,8 +94,8 @@ async function renderOverview() {
           <td class="note mono">${esc(i.contract && i.contract !== 'cont' ? i.contract : i.root)}</td>
           <td class="r mono" data-qp="${esc(i.key)}">${fmtPrice(i.quote?.price ?? i.stats?.last ?? i.perf?.last)}</td>
           ${PERF_COLS.map(([k]) => {
-            // 1日涨跌优先用每 5 分钟更新的报价（相对前一交易日结算），其余周期用日线
-            const v = k === 'd1' ? (i.quote?.chg_pct ?? i.perf?.d1) : i.perf?.[k];
+            // 1日涨跌只用每 5 分钟更新的报价（相对前一交易日结算）；报价不可用时显示"—"，不拿日线推算的数字顶替
+            const v = k === 'd1' ? (i.quote?.chg_pct ?? null) : i.perf?.[k];
             return `<td class="r mono hc" ${k === 'd1' ? `data-qc="${esc(i.key)}"` : ''} style="${heat(v, SCALE[k])}">${sign(v, k === 'd1' ? 2 : 1)}</td>`;
           }).join('')}
           <td>${i.perf?.pos52 !== null && i.perf?.pos52 !== undefined ? `<span class="rng" title="52周区间位置 ${i.perf.pos52}%"><b style="left:${i.perf.pos52}%"></b></span>` : '—'}</td>

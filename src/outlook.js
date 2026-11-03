@@ -12,7 +12,7 @@ import { isOpen, etParts } from './sessions.js';
 import { upcomingEvents } from './calendar.js';
 import { generate, chainFor } from './llm.js';
 import { relatedEvents } from './futures.js';
-import { latestQuotes } from './quotes.js';
+import { quotesWithStatus } from './quotes.js';
 
 const HOUR = 3600;
 const DAY = 86400;
@@ -207,7 +207,7 @@ export function computeOutlook(inst, rows, { nowSec, events = [], stats = hourSt
 /** 每整点：为所有开盘品种生成本小时的展望 */
 export async function makeOutlooks(env, { nowSec = Math.floor(Date.now() / 1000) } = {}) {
   const events = await upcomingEvents(env, { nowMs: (nowSec - 4 * HOUR) * 1000, days: 1 });
-  const quotes = await latestQuotes(env);
+  const { quotes } = await quotesWithStatus(env); // 报价不可用时退回用小时线作基准价
   const out = [];
   for (const inst of INSTRUMENTS) {
     try {

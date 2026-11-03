@@ -345,3 +345,6 @@ i.dot.na { background: var(--line); }
 .tfsw button.on { background: var(--panel-2); color: var(--text); }
 @keyframes qflash { from { background: color-mix(in srgb, var(--accent) 35%, transparent); } to { background: transparent; } }
 .flash { animation: qflash 1.2s ease-out; }
+.gbanner { position: sticky; top: 0; z-index: 2000; background: color-mix(in srgb, var(--l3) 22%, var(--panel)); border-bottom: 1px solid var(--l3); padding: 8px 20px; font-size: 13px; }
+.gbanner button, .warnbox button { background: transparent; border: 0; color: var(--accent); cursor: pointer; font: inherit; padding: 0; }
+.notice.warnbox { border-color: color-mix(in srgb, var(--l3) 60%, transparent); background: color-mix(in srgb, var(--l3) 12%, transparent); }

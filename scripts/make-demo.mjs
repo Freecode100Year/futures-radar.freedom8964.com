@@ -295,11 +295,14 @@ for (const inst of INSTRUMENTS) {
   const b = BRIEFS[inst.key];
   instruments.push({ key: inst.key, name: inst.name, sector: inst.sector, unit: inst.unit, root: inst.root, contract: snap.contract, stats, spark: snap.daily.slice(-30).map((d) => d[1]),
     structure: curves[inst.key].metrics.structure, roll_yield_ann_pct: curves[inst.key].metrics.roll_yield_ann_pct, brief: b ? { day: today, headline: b.headline, price_action: b.price_action } : null, updated_at: snap.updated_at,
-    perf: { d1: snap.perf.d1, w1: snap.perf.w1, m1: snap.perf.m1, m3: snap.perf.m3, ytd: snap.perf.ytd, y1: snap.perf.y1, pos52: snap.perf.pos52 }, rsi14: snap.tech.rsi14,
+    quote: { contract: snap.contract, price: stats.last, prev_close: +(stats.last / (1 + (snap.perf.d1 ?? 0) / 100)).toFixed(4), chg_pct: snap.perf.d1, market_time: iso(NOW - 900), updated_at: iso(NOW - 120) },
+    perf: { w1: snap.perf.w1, m1: snap.perf.m1, m3: snap.perf.m3, ytd: snap.perf.ytd, y1: snap.perf.y1, pos52: snap.perf.pos52 }, rsi14: snap.tech.rsi14,
     cot: { net: cot.net, net_change: cot.net_change, net_pct_oi: cot.net_pct_oi, cot_index: cot.cot_index, state: cot.state, report_date: cot.report_date, group: COT_GROUP_LABEL[inst.cftc.report] } });
   instrumentDetails[inst.key] = {
     instrument: { key: inst.key, name: inst.name, sector: inst.sector, unit: inst.unit, root: inst.root, exchange: inst.exchange, months: inst.months, spec: inst.spec, session_hours: SESSION_LABEL[inst.spec.session], cftc_code: inst.cftc.code },
     snapshot: snap,
+    quote: instruments.at(-1).quote,
+    quotes_status: { ok: true },
     brief: b ? { day: today, created_at: iso(NOW - 3 * H), model: 'glm:glm-4.7-flash（演示）', ...b } : null,
     events: evRel(inst.key),
     hit_rate: hit(inst.key),
@@ -397,6 +400,8 @@ const outlook = { now: iso(NOW), window_start: iso(Math.floor(olNow / H) * H), c
 // ---------------- 总览 ----------------
 const nowMs = NOW * 1000;
 const overview = {
+  quotes_status: { ok: true, error: null, last_update: iso(NOW - 120), stale: false, count: 12 },
+  history_ready: 12,
   instruments: instruments.map((i) => ({ ...i, notional: notional(i.stats?.last, byKey[i.key].spec) })),
   correlation: correlationMatrix(dailyBars, INSTRUMENTS.map((i) => i.key), 60),
   spreads: SPREADS.map((d) => spreadStats(dailyBars, d)).filter(Boolean),

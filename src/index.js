@@ -9,7 +9,14 @@ import { updateCot } from './cot.js';
 import { upcomingEvents, addEvent } from './calendar.js';
 import { etParts } from './sessions.js';
 import { updateQuotes, purgeQuotes, intradayCandles, latestQuotes } from './quotes.js';
+import { ensureSchema } from './schema-guard.js';
 import { makeOutlooks, evaluateOutlooks, getOutlook, getHourly, outlookTrack, generateOutlookCommentary } from './outlook.js';
+
+/** 从步骤返回值里找出逐项错误：数组里带 error 的项，或对象里各个数组字段中带 error 的项 */
+export function itemErrors(res) {
+  const lists = Array.isArray(res) ? [res] : res && typeof res === 'object' ? Object.values(res).filter(Array.isArray) : [];
+  return lists.flat().filter((x) => x && typeof x === 'object' && x.error).map((x) => `${x.instrument || x.report || x.key || '?'}: ${x.error}`);
+}
 
 // 按美东时间安排的任务（"HH:MM" → 当天第几分钟）
 const SCHEDULE = Object.fromEntries(['05:00', '16:00', '16:50', '17:05', '17:10', '17:15', '17:20', '17:25', '17:30'].map((k) => [k, Number(k.slice(0, 2)) * 60 + Number(k.slice(3))]));
@@ -81,6 +88,7 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     const path = url.pathname;
+    if (path.startsWith('/api/')) await ensureSchema(env); // 漏跑迁移时自动补建新表（每个实例只检查一次）
     try {
       if (req.method === 'GET' && path === '/api/events') return json(await listEvents(env, url));
 
@@ -112,9 +120,22 @@ export default {
       if (req.method === 'GET' && qm) {
         if (!INSTRUMENTS.some((i) => i.key === qm[1])) return json({ error: 'not found' }, 404);
         const hours = Math.min(Math.max(Number(url.searchParams.get('hours') || 24), 1), 120);
-        return json({ instrument: qm[1], ...(await intradayCandles(env, qm[1], { hours })), quote: (await latestQuotes(env))[qm[1]] || null });
+        try {
+          return json({ instrument: qm[1], ...(await intradayCandles(env, qm[1], { hours })), quote: (await latestQuotes(env))[qm[1]] || null });
+        } catch (err) {
+          return json({ error: 'intraday_unavailable', detail: String(err.message || err) }, 503);
+        }
       }
-      if (req.method === 'GET' && path === '/api/quotes') return json(await latestQuotes(env));
+      if (req.method === 'GET' && path === '/api/quotes') {
+        // 出错或为空时返回 503 而不是 200 + {}，让监控和前端都能看出来
+        try {
+          const q = await latestQuotes(env);
+          if (!Object.keys(q).length) return json({ error: 'quotes_empty', hint: '报价表为空，检查 /api/data-status 的 cron_steps.quotes' }, 503);
+          return json(q);
+        } catch (err) {
+          return json({ error: 'quotes_unavailable', detail: String(err.message || err) }, 503);
+        }
+      }
       const hm = path.match(/^\/api\/instruments\/([a-z0-9]+)\/hourly$/);
       if (req.method === 'GET' && hm) {
         const data = await getHourly(env, hm[1], { hours: Number(url.searchParams.get('hours') || 72) });
@@ -210,6 +231,7 @@ export default {
   // Cron 每 5 分钟。每一步单独 try/catch：某一步失败（例如行情源限流）不会让后面的步骤被跳过。
   // 与收盘相关的任务按美东时间安排（自动处理夏令时），见 SCHEDULE。
   async scheduled(controller, env, ctx) {
+    const schema = await ensureSchema(env);
     const t = new Date(controller.scheduledTime || Date.now());
     const nowSec = Math.floor(t.getTime() / 1000);
     const minute = t.getUTCMinutes();
@@ -217,7 +239,7 @@ export default {
     const et = etParts(t); // { day: 0=周日, minute: 当天第几分钟 }
     const etAt = (hhmm) => et.minute === SCHEDULE[hhmm];
     const weekday = et.day >= 1 && et.day <= 5;
-    const log = { cron: controller.cron, group, et: `${et.day}/${Math.floor(et.minute / 60)}:${String(et.minute % 60).padStart(2, '0')}`, errors: {} };
+    const log = { cron: controller.cron, group, schema: schema.created.length || schema.added.length || schema.errors.length ? schema : undefined, et: `${et.day}/${Math.floor(et.minute / 60)}:${String(et.minute % 60).padStart(2, '0')}`, errors: {} };
     const LOGGED = new Set(['quotes', 'market', 'curves', 'daily', 'cot', 'ensure_history', 'snapshots', 'outlook', 'outlook_eval', 'brief_queue']);
     const record = async (name, ok, detail) => {
       if (!LOGGED.has(name)) return;
@@ -229,7 +251,14 @@ export default {
     const step = async (name, fn) => {
       try {
         const res = await fn();
-        await record(name, true, res);
+        // 很多步骤逐个品种 try/catch、把错误放进返回值；只要有一项失败，这一步就记为失败
+        const failed = itemErrors(res);
+        if (failed.length) {
+          log.errors[name] = failed.slice(0, 12);
+          await record(name, false, res);
+        } else {
+          await record(name, true, res);
+        }
         return res;
       } catch (err) {
         log.errors[name] = String(err?.message || err);
@@ -302,6 +331,7 @@ export default {
 
   // Queue 消费者：文章聚类 / 事件分析
   async queue(batch, env) {
+    await ensureSchema(env);
     const articleMsgs = batch.messages.filter((m) => m.body.type === 'article');
     if (articleMsgs.length) {
       try {
