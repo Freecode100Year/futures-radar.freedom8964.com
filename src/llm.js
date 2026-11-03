@@ -505,7 +505,15 @@ export async function generate(env, { chain, purpose, system, user, schema, maxT
     let userMsg = user;
     const tries = p.kind === 'anthropic' || p.noRepair ? 1 : 2; // 第二次把校验错误发回去让模型修正
     for (let t = 0; t < tries; t++) {
-      const reservation = id === 'gemini' ? await reserveGeminiRequest(env) : null;
+      let reservation = null;
+      if (id === 'gemini') {
+        try {
+          reservation = await reserveGeminiRequest(env);
+        } catch (err) {
+          attempts.push({ provider: id, skipped: `额度预占失败，未发送请求：${err.message}` });
+          break;
+        }
+      }
       if (id === 'gemini' && !reservation) {
         attempts.push({ provider: id, skipped: '今日额度已被并发请求占用或用完' });
         break;
@@ -552,7 +560,15 @@ export async function selfTest(env) {
     }
     const t0 = Date.now();
     const model = await selectedModelOf(env, id);
-    const reservation = id === 'gemini' ? await reserveGeminiRequest(env) : null;
+    let reservation = null;
+    if (id === 'gemini') {
+      try {
+        reservation = await reserveGeminiRequest(env);
+      } catch (e) {
+        out.push({ provider: id, label: PROVIDERS[id].label, model, status: '额度预占失败，未发送请求' });
+        continue;
+      }
+    }
     if (id === 'gemini' && !reservation) {
       out.push({ provider: id, label: PROVIDERS[id].label, model, status: '今日额度已用完' });
       continue;
