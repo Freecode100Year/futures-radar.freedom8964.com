@@ -336,13 +336,15 @@ async function usageToday(env, id) {
 }
 
 async function reserveGeminiRequest(env) {
+  const cap = capsOf(env, 'gemini').requests;
+  if (cap <= 0) return null;
   return env.DB.prepare(
     `INSERT INTO api_usage (day, model, purpose, calls, failures, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
      VALUES (?, 'gemini:quota', 'reservation', 1, 0, 0, 0, 0, 0, 0)
      ON CONFLICT(day, model, purpose) DO UPDATE SET calls = calls + 1
        WHERE api_usage.calls < ?
      RETURNING day, calls`,
-  ).bind(quotaDay('gemini'), capsOf(env, 'gemini').requests).first();
+  ).bind(quotaDay('gemini'), cap).first();
 }
 
 function capsOf(env, id) {
@@ -350,7 +352,7 @@ function capsOf(env, id) {
   const k = id.toUpperCase().replace(/-/g, '_');
   return {
     requests: id === 'gemini'
-      ? Math.min(p.caps.requests, num(env[`${k}_DAILY_REQUESTS`], p.caps.requests))
+      ? Math.max(0, Math.floor(Math.min(p.caps.requests, num(env[`${k}_DAILY_REQUESTS`], p.caps.requests))))
       : num(env[`${k}_DAILY_REQUESTS`], p.caps.requests ?? Infinity),
     tokens: num(env[`${k}_DAILY_TOKENS`], p.caps.tokens ?? Infinity),
     neurons: num(env[`${k}_DAILY_NEURONS`], p.caps.neurons ?? Infinity),
