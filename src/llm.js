@@ -4,6 +4,9 @@ import { costOf } from './pricing.js';
 
 const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const today = () => new Date().toISOString().slice(0, 10);
+const quotaDay = (id) => id === 'gemini'
+  ? new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+  : today();
 
 // ---------------------------------------------------------------------------
 // 提供商注册表
@@ -16,6 +19,10 @@ export const PROVIDERS = {
     label: 'Cloudflare Workers AI', kind: 'workersai', model: '@cf/qwen/qwen3-30b-a3b-fp8', modelEnv: 'WORKERSAI_MODEL',
     // 免费 10,000 Neurons/天；按每百万 token 输入 $0.051 / 输出 $0.335、$0.011 = 1000 Neurons 估算，留 2000 余量
     caps: { neurons: 8000 }, priceIn: 0.051, priceOut: 0.335,
+  },
+  gemini: {
+    label: 'Google Gemini 3.1 Flash-Lite', kind: 'gemini', keyEnv: 'GEMINI_API_KEY',
+    model: 'gemini-3.1-flash-lite', modelEnv: 'GEMINI_MODEL', caps: { requests: 10 },
   },
   'groq-fast': {
     label: 'Groq Llama 3.1 8B', kind: 'openai', url: 'https://api.groq.com/openai/v1/chat/completions',
@@ -59,16 +66,16 @@ export const PROVIDERS = {
 // 默认调用链（可用环境变量覆盖，逗号分隔）。没配 key 的提供商会被自动跳过。
 export const DEFAULT_CHAINS = {
   // 分诊：量大、提示短、只要 4 个字段 → 先用额度最宽的
-  triage: 'workersai,groq-fast,glm,groq,opencode,openrouter,claude-haiku',
+  triage: 'workersai,groq-fast,glm,groq,opencode,openrouter,gemini,claude-haiku',
   // 一般事件的深度分析：提示约 1 万 token、输出复杂 JSON → 先用能力强的免费模型；Groq 免费版每分钟 token 上限装不下，不放进来
-  analysis: 'ollama,glm,opencode,workersai,openrouter,claude-haiku',
+  analysis: 'ollama,glm,opencode,workersai,openrouter,gemini,claude-haiku',
   // 重要事件（粗分 ≥4 或已判严重）：有 Anthropic key 时先用 Sonnet
-  analysis_important: 'claude-sonnet,ollama,glm,opencode,workersai,openrouter,claude-haiku',
+  analysis_important: 'claude-sonnet,ollama,glm,opencode,workersai,openrouter,gemini,claude-haiku',
   // 每日品种解读：提示约 3K token，Groq 70B 装得下 → 也放进来
-  brief: 'glm,ollama,groq,opencode,workersai,openrouter,claude-haiku',
+  brief: 'glm,ollama,groq,opencode,workersai,openrouter,gemini,claude-haiku',
   // 每小时情景解读：只在有数据发布/波动偏高/相关新闻/固定时段时调用，每天约 6–10 次，提示约 2K token
   // → 先用响应快的 Groq；Workers AI 每天的免费额度留给量最大的分诊，放最后
-  outlook: 'groq,glm,ollama,opencode,openrouter,workersai',
+  outlook: 'groq,glm,ollama,opencode,openrouter,workersai,gemini',
 };
 
 export function chainFor(env, task) {
@@ -235,6 +242,27 @@ async function callOpenAI(env, id, { system, user, schema, maxTokens, model: mod
   };
 }
 
+async function callGemini(env, id, { system, user, schema, maxTokens, model: modelOverride }) {
+  const model = modelOverride || configuredModelOf(env, id);
+  const data = await httpJson(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+    body: JSON.stringify({
+      system_instruction: { parts: [{ text: `${system}\n\n${schemaPrompt(schema)}` }] },
+      contents: [{ role: 'user', parts: [{ text: user }] }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: maxTokens, responseMimeType: 'application/json' },
+    }),
+  }, num(env.LLM_TIMEOUT_MS, 90000));
+  const candidate = data.candidates?.[0];
+  const text = (candidate?.content?.parts || []).map((part) => part.text || '').join('');
+  if (!text) throw new ProviderError('Gemini 未返回文本结果', { status: 502 });
+  return {
+    text,
+    model: data.modelVersion || model,
+    usage: { input: data.usageMetadata?.promptTokenCount ?? 0, output: data.usageMetadata?.candidatesTokenCount ?? 0 },
+  };
+}
+
 async function callOllama(env, id, { system, user, schema, maxTokens }) {
   const p = PROVIDERS[id];
   const body = {
@@ -294,7 +322,7 @@ async function callAnthropic(env, id, { system, user, schema, maxTokens, toolNam
   return { data: block.input, model, usage: { input: u.input_tokens ?? 0, output: u.output_tokens ?? 0, cacheRead: u.cache_read_input_tokens ?? 0, cacheWrite: u.cache_creation_input_tokens ?? 0 } };
 }
 
-const CALLERS = { openai: callOpenAI, ollama: callOllama, workersai: callWorkersAI, anthropic: callAnthropic };
+const CALLERS = { openai: callOpenAI, gemini: callGemini, ollama: callOllama, workersai: callWorkersAI, anthropic: callAnthropic };
 
 // ---------------------------------------------------------------------------
 // 额度、冷却、记账
@@ -304,14 +332,16 @@ async function usageToday(env, id) {
   return (await env.DB.prepare(
     `SELECT COALESCE(SUM(calls),0) AS calls, COALESCE(SUM(input_tokens),0) AS input, COALESCE(SUM(output_tokens),0) AS output
      FROM api_usage WHERE day = ? AND model LIKE ?`,
-  ).bind(today(), `${id}:%`).first()) || { calls: 0, input: 0, output: 0 };
+  ).bind(quotaDay(id), `${id}:%`).first()) || { calls: 0, input: 0, output: 0 };
 }
 
 function capsOf(env, id) {
   const p = PROVIDERS[id];
   const k = id.toUpperCase().replace(/-/g, '_');
   return {
-    requests: num(env[`${k}_DAILY_REQUESTS`], p.caps.requests ?? Infinity),
+    requests: id === 'gemini'
+      ? Math.min(p.caps.requests, num(env[`${k}_DAILY_REQUESTS`], p.caps.requests))
+      : num(env[`${k}_DAILY_REQUESTS`], p.caps.requests ?? Infinity),
     tokens: num(env[`${k}_DAILY_TOKENS`], p.caps.tokens ?? Infinity),
     neurons: num(env[`${k}_DAILY_NEURONS`], p.caps.neurons ?? Infinity),
   };
@@ -365,7 +395,7 @@ async function record(env, id, model, purpose, usage, ok) {
          input_tokens = input_tokens + excluded.input_tokens, output_tokens = output_tokens + excluded.output_tokens,
          cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens, cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
          cost_usd = cost_usd + excluded.cost_usd`,
-    ).bind(today(), `${id}:${model}`, purpose, ok ? 0 : 1, usage.input || 0, usage.output || 0, usage.cacheRead || 0, usage.cacheWrite || 0, cost).run();
+    ).bind(quotaDay(id), `${id}:${model}`, purpose, ok ? 0 : 1, usage.input || 0, usage.output || 0, usage.cacheRead || 0, usage.cacheWrite || 0, cost).run();
   } catch (e) {
     console.error('record usage', e);
   }

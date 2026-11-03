@@ -43,14 +43,16 @@ AI_GATEWAY_ID = "default"                # Workers AI 经 AI Gateway 调用，�
 WORKERSAI_DAILY_REQUESTS = "100"           # 每天最多 100 次优先走 Qwen；其余模型只作故障/额度回退
 GROQ_DAILY_REQUESTS = "1000"
 OPENROUTER_DAILY_REQUESTS = "45"           # 免费 50 次留 5 次余量
+GEMINI_DAILY_REQUESTS = "10"               # Gemini 免费模型保守限制为每天最多 10 次
 # 所有任务都先走 Workers AI Qwen 3 30B，再按免费额度回退：
-CHAIN_TRIAGE = "workersai,glm,groq,ollama,opencode,openrouter"
-CHAIN_ANALYSIS = "workersai,glm,ollama,opencode,openrouter"
-CHAIN_ANALYSIS_IMPORTANT = "workersai,glm,ollama,opencode,openrouter"
-CHAIN_BRIEF = "glm,ollama,groq,opencode,openrouter,workersai"      # 美东 17:30 生成；Workers AI 额度白天已被分诊用完，放最后
-CHAIN_OUTLOOK = "groq,glm,ollama,opencode,openrouter,workersai"   # 每小时风险情景（只在有话可说时调用，每天约 6–10 次）
-# 各家模型可单独覆盖：WORKERSAI_MODEL / GROQ_MODEL / GLM_MODEL / OLLAMA_MODEL / OPENCODE_MODEL / OPENROUTER_MODEL
+CHAIN_TRIAGE = "workersai,glm,groq,ollama,opencode,openrouter,gemini"
+CHAIN_ANALYSIS = "workersai,glm,ollama,opencode,openrouter,gemini"
+CHAIN_ANALYSIS_IMPORTANT = "workersai,glm,ollama,opencode,openrouter,gemini"
+CHAIN_BRIEF = "glm,ollama,groq,opencode,openrouter,workersai,gemini"      # 美东 17:30 生成；Workers AI 额度白天已被分诊用完，放最后
+CHAIN_OUTLOOK = "groq,glm,ollama,opencode,openrouter,workersai,gemini"   # 每小时风险情景（只在有话可说时调用，每天约 6–10 次）
+# 各家模型可单独覆盖：WORKERSAI_MODEL / GEMINI_MODEL / GROQ_MODEL / GLM_MODEL / OLLAMA_MODEL / OPENCODE_MODEL / OPENROUTER_MODEL
 WORKERSAI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8"
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GLM_MODEL = "glm-4.7-flash"
 OPENCODE_MODEL = "deepseek-v4.1-flash-free"
@@ -82,6 +84,7 @@ MARKET_PRE_HOURS = "2"                   # 市场反应锚点 = 首篇报道时�
 #   GROQ_API_KEY         Groq
 #   OPENCODE_API_KEY     OpenCode Zen
 #   OPENROUTER_API_KEY   OpenRouter
+#   GEMINI_API_KEY       Google Gemini（免费模型，每日最多 10 次）
 #   ANTHROPIC_API_KEY    可选，Claude（付费）
 #   TWELVEDATA_API_KEY   可选，行情备用源
 # Workers AI 通过 [ai] 绑定调用，不需要 key。
