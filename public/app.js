@@ -355,6 +355,7 @@ async function showCalibration() {
   document.querySelectorAll('.card').forEach((c) => c.classList.remove('sel'));
   const c = (await api('/api/calibration')) || (await loadDemo()).calibration;
   const pct = (v) => (v === null || v === undefined ? '—' : Math.round(v * 100) + '%');
+  const olTrack = await outlookTrackHtml().catch(() => '');
   $('#detail').innerHTML = `<div class="d-head"><div><h2>模型校准统计</h2><div class="meta">基于 ${c.events} 个有行情数据的事件</div></div></div>
     <div class="tiles">
       <div class="tile"><span>方向命中率</span><b>${pct(c.direction.hit_rate)}</b><em>命中 ${c.direction.hits} · 相反 ${c.direction.misses} · 不显著 ${c.direction.insignificant}</em></div>
@@ -368,7 +369,8 @@ async function showCalibration() {
       <li>偏差长期为负，说明模型习惯低估市场冲击，可以在提示词里提醒它，或调整 <code>observedShockScore</code> 的刻度。</li>
       <li>某个资产命中率接近 50%，说明模型在这个资产上和抛硬币差不多，可以考虑不让它预测这个资产的方向。</li>
       <li>样本少于 30 个事件时，这些比例波动很大，先别据此调参。</li>
-    </ul></div>`;
+    </ul></div>
+    ${olTrack}`;
 }
 
 let map;
@@ -495,6 +497,8 @@ function renderInstrument(d) {
     </div>
   </div>
 
+  ${hourlyPlaceholder()}
+
   ${instrumentToolsHtml(d)}
 
   ${b ? `<div class="box brief">
@@ -528,6 +532,7 @@ function renderInstrument(d) {
   drawPriceChart(snap?.daily || [], inst);
   drawInstrumentTools(d);
   if (cm) drawCurveChart(snap.curve.points);
+  loadHourlyBox(inst);
 }
 
 function drawPriceChart(daily, inst) {

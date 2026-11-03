@@ -241,7 +241,7 @@ test('自动补齐：每次补 3 个品种的日线；持仓过期才拉；日�
   const now = Math.floor(Date.now() / 1000);
   // 只有小时线（例如刚部署）：快照里涨跌和 RSI 应该用小时线估算出来，季节性为空
   const pts = synthSeries({ start: now - 100 * 86400, end: now, base: 80, seed: 3 });
-  const st = env.DB._db.prepare("INSERT INTO prices VALUES ('brent', 'BZF27', ?, ?)");
+  const st = env.DB._db.prepare("INSERT INTO prices (instrument, contract, ts, close) VALUES ('brent', 'BZF27', ?, ?)");
   for (const p of pts) st.run(p.ts, p.close);
   await computeSnapshots(env, now);
   let ov = await (await worker.fetch(new Request('https://x/api/overview'), env, {})).json();

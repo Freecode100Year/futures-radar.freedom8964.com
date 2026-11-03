@@ -126,8 +126,8 @@ export async function updateCurves(env, { group = null, nowSec = Math.floor(Date
       ).bind(inst.key, active.contract, active.symbol, new Date(nowSec * 1000).toISOString()).run();
       try {
         const bars = await fetcher(active.symbol, { interval: '60m', range: '3mo' });
-        const stmt = env.DB.prepare('INSERT OR REPLACE INTO prices (instrument, contract, ts, close) VALUES (?, ?, ?, ?)');
-        for (let i = 0; i < bars.length; i += 400) await env.DB.batch(bars.slice(i, i + 400).map((b) => stmt.bind(inst.key, active.contract, b.ts, b.close)));
+        const stmt = env.DB.prepare('INSERT OR REPLACE INTO prices (instrument, contract, ts, open, high, low, close) VALUES (?, ?, ?, ?, ?, ?, ?)');
+        for (let i = 0; i < bars.length; i += 400) await env.DB.batch(bars.slice(i, i + 400).map((b) => stmt.bind(inst.key, active.contract, b.ts, b.open ?? null, b.high ?? null, b.low ?? null, b.close)));
       } catch (e) {
         errors.push(`回填 ${active.symbol}: ${e.message}`);
       }

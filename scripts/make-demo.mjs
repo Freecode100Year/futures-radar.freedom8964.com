@@ -9,7 +9,8 @@ import { synthSeries } from '../test/mock-env.js';
 import { performance, technicals, pivots, seasonality, correlationMatrix, SPREADS, spreadStats, notional } from '../src/analytics.js';
 import { cotMetrics, COT_GROUP_LABEL } from '../src/cot.js';
 import { recurringEvents } from '../src/calendar.js';
-import { SESSION_LABEL } from '../src/sessions.js';
+import { SESSION_LABEL, isOpen } from '../src/sessions.js';
+import { hourlyCandles, hourStats, computeOutlook, priceTime } from '../src/outlook.js';
 
 const NOW = Math.floor(Date.now() / 1000);
 const H = 3600, D = 86400;
@@ -320,6 +321,60 @@ const calibration = { events: ms.length, direction: { hits, misses, insignifican
   market_shock: { n: diffs.length, bias: avg(diffs), mae: avg(diffs.map(Math.abs)) },
   by_instrument: Object.entries(per).map(([key, x]) => ({ key, ...x, hit_rate: Math.round((x.hit / (x.hit + x.miss)) * 1000) / 1000 })) };
 
+// ---------------- 小时行情与一小时风险展望 ----------------
+// 演示时间若遇休市，就往前找最近一个开盘的整点作为"当前窗口"
+const DEMO_AI = {
+  wti: { context: '[演示] 本小时无数据发布，油价延续早盘区间整理', upside: '若中东航运消息再度紧张，价格可能冲向区间上沿', downside: '若美元走强或风险偏好回落，可能回到区间下沿', watch: '霍尔木兹海峡航运动态' },
+  brent: { context: '[演示] 与 WTI 同步，价差稳定', upside: '欧洲炼厂需求数据好于预期时可能走强', downside: '若 OPEC+ 增产传闻发酵，可能承压', watch: '布伦特-WTI 价差' },
+  gold: { context: '[演示] 美元指数小幅走弱', upside: '若美债收益率继续回落，金价可能向上沿运动', downside: '若美联储官员讲话偏鹰，可能回落', watch: '10 年期美债收益率' },
+  es: { context: '[演示] 美股盘前，科技股财报季', upside: '大型科技股盘前走强时可能带动指数上行', downside: '若经济数据弱于预期，可能下探区间下沿', watch: '纳指期货与美元指数' },
+};
+let olNow = Math.floor(NOW / H) * H + 600;
+while (!isOpen('globex', new Date(olNow * 1000))) olNow -= H;
+const hourlyDemo = {}, olRows = {};
+let tot = { n: 0, h68: 0, h95: 0 };
+const trackBy = [];
+for (const inst of INSTRUMENTS) {
+  // 合成数据的时间戳不在整点：对齐到整点并补上开高低，模拟交易所的小时K线
+  const rows = [];
+  let prev = null;
+  for (const p of hourly[inst.key]) {
+    const ts = Math.floor(p.ts / H) * H;
+    if (rows.length && rows.at(-1).ts === ts) continue;
+    if (!isOpen(inst.spec.session, new Date((ts + 1800) * 1000))) { prev = p.close; continue; }
+    const o = prev ?? p.close, w = Math.abs(p.close - o) * 0.4 + p.close * 0.0006;
+    rows.push({ ts, open: o, high: Math.max(o, p.close) + w * 0.5, low: Math.min(o, p.close) - w * 0.5, close: p.close });
+    prev = p.close;
+  }
+  const upTo = rows.filter((r) => priceTime(r) <= olNow - 600);
+  const stats = hourStats(upTo);
+  const cur = computeOutlook(inst, upTo, { nowSec: olNow, stats, events: [] });
+  // 最近 24 个整点：用当时可得的数据生成区间，再用之后的收盘核对
+  const hist = [];
+  for (let w = olNow - 24 * H; w < olNow - H; w += H) {
+    const known = rows.filter((r) => priceTime(r) <= w);
+    const o = computeOutlook(inst, known, { nowSec: w + 600, stats: hourStats(known) });
+    if (o.status !== 'open') continue;
+    const act = rows.find((r) => priceTime(r) === o.window_end);
+    if (!act) continue;
+    const hit68 = act.close >= o.lo68 && act.close <= o.hi68 ? 1 : 0, hit95 = act.close >= o.lo95 && act.close <= o.hi95 ? 1 : 0;
+    hist.push({ window_start: iso(o.window_start), window_end: iso(o.window_end), base_price: o.base_price, lo68: o.lo68, hi68: o.hi68, lo95: o.lo95, hi95: o.hi95, actual: +act.close.toFixed(6), hit68, hit95, evaluated: true });
+  }
+  const h68 = hist.reduce((a, h) => a + h.hit68, 0), h95 = hist.reduce((a, h) => a + h.hit95, 0);
+  tot = { n: tot.n + hist.length, h68: tot.h68 + h68, h95: tot.h95 + h95 };
+  const tr = { key: inst.key, name: inst.name, n: hist.length, hit68: hist.length ? +(h68 / hist.length).toFixed(3) : null, hit95: hist.length ? +(h95 / hist.length).toFixed(3) : null,
+    above68: hist.filter((h) => h.actual > h.hi68).length, below68: hist.filter((h) => h.actual < h.lo68).length };
+  trackBy.push(tr);
+  const current = cur.status === 'open' ? { ...cur, window_start: iso(cur.window_start), window_end: iso(cur.window_end), made_at: iso(cur.made_at), base_time: iso(cur.base_ts), status: 'current', instrument: inst.key, name: inst.name, unit: inst.unit, ai: DEMO_AI[inst.key] || null } : null;
+  olRows[inst.key] = current || { instrument: inst.key, name: inst.name, status: 'closed' };
+  hourlyDemo[inst.key] = { instrument: inst.key, contract: curves[inst.key].active, candles: hourlyCandles(rows.filter((r) => r.ts <= olNow - H), 72), current, session_open: !!current,
+    history: hist.reverse(), hour_profile: stats ? Object.entries(stats.hour).map(([h, v]) => ({ hour: Number(h), sigma_pct: +(v.sigma * 100).toFixed(4), n: v.n })) : [],
+    track: { days: 30, target68: 0.683, target95: 0.954, overall: {}, by_instrument: [tr] } };
+}
+const rate = (a, n) => (n ? +(a / n).toFixed(3) : null);
+const outlookTrack = { days: 30, target68: 0.683, target95: 0.954, overall: { n: tot.n, hit68: rate(tot.h68, tot.n), hit95: rate(tot.h95, tot.n) }, by_instrument: trackBy };
+const outlook = { now: iso(NOW), window_start: iso(Math.floor(olNow / H) * H), commentary_model: 'groq（演示）', instruments: INSTRUMENTS.map((i) => olRows[i.key]), track: outlookTrack };
+
 // ---------------- 总览 ----------------
 const nowMs = NOW * 1000;
 const overview = {
@@ -331,6 +386,7 @@ const overview = {
   top_events: events.filter((e) => e.status === 'analyzed').sort((a, b) => b.severity - a.severity).map((e) => ({ id: e.id, title: e.title, severity: e.severity, level: e.level, sectors: e.sectors, last_updated_at: e.last_updated_at })),
 };
 
-writeFileSync(new URL('../public/demo.json', import.meta.url), JSON.stringify({ events, details, calibration, instruments, instrumentDetails, overview }));
+writeFileSync(new URL('../public/demo.json', import.meta.url), JSON.stringify({ events, details, calibration, instruments, instrumentDetails, overview, outlook, hourly: hourlyDemo }));
 for (const d of Object.values(details)) if (d.event.market) console.log(d.event.id, d.event.title_zh, 'model', d.event.market.model_score, '→', d.event.market.blended_score, d.event.market.instruments.map((r) => `${r.key}:${r.z}:${r.verdict}`).join(' '));
+console.log('一小时区间（演示回测）', outlookTrack.overall);
 console.log(instruments.map((i) => `${i.key} ${i.contract} ${i.stats.last.toFixed(2)} ${i.structure}`).join('\n'));

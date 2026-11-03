@@ -291,3 +291,51 @@ table.piv td.pp { color: var(--text); font-weight: 700; }
 .star:hover { color: var(--l2); }
 .d-head h2 .star { font-size: 18px; }
 .notice { margin-top: 10px; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--l2) 45%, var(--line)); border-radius: 6px; font-size: 13px; color: #e8d3a8; background: color-mix(in srgb, var(--l2) 8%, transparent); }
+
+/* v0.7 小时行情与风险展望 */
+.tiles.t2 { grid-template-columns: repeat(2, 1fr); }
+.olt td { vertical-align: middle; }
+.olt tr.stale td { opacity: 0.6; }
+.olt .aiw { font-size: 12.5px; color: #cfd5df; min-width: 140px; }
+.evchip { display: inline-block; font-size: 11px; padding: 1px 6px; margin: 1px 4px 1px 0; border-radius: 10px; background: color-mix(in srgb, var(--l2) 18%, transparent); color: var(--l2); white-space: nowrap; }
+.evchip.hot { background: color-mix(in srgb, var(--l3) 18%, transparent); color: var(--l3); }
+.rbar { position: relative; height: 30px; min-width: 170px; margin: 2px 0; }
+.rbar .b95 { position: absolute; left: 0; right: 0; top: 4px; height: 10px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.rbar .b68 { position: absolute; top: 4px; height: 10px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 45%, transparent); }
+.rbar i { position: absolute; top: 1px; width: 2px; height: 16px; margin-left: -1px; }
+.rbar i.base { background: var(--text); }
+.rbar i.act { background: var(--up); width: 3px; }
+.rbar i.act.miss { background: var(--down); }
+.rbar em { position: absolute; top: 15px; font-style: normal; font-size: 10.5px; color: var(--muted); font-family: var(--mono); transform: translateX(-50%); }
+.rbar em.l { left: 16%; }
+.rbar em.h { left: 84%; }
+.hgrid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 3px; margin-top: 4px; }
+.hc2 { border: 1px solid var(--line); border-radius: 4px; padding: 3px 4px; text-align: center; line-height: 1.25; }
+.hc2 span { display: block; font-size: 10.5px; color: var(--muted); }
+.hc2 b { font-size: 11.5px; font-weight: 500; }
+@media (max-width: 700px) { .hgrid { grid-template-columns: repeat(6, 1fr); } }
+.olc-h { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 16px; margin-bottom: 6px; font-size: 13px; }
+.olc .rbar { margin-bottom: 8px; }
+table.kv td { padding: 4px 8px 4px 0; border: 0; font-size: 13px; }
+table.kv td:first-child { color: var(--muted); white-space: nowrap; }
+.scen { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.scen p { margin: 4px 0; font-size: 13px; }
+.sc { font-size: 13px; padding: 6px 10px; border-radius: 6px; margin: 6px 0; border-left: 3px solid; background: var(--panel-2); }
+.sc b { margin-right: 8px; font-weight: 600; }
+.sc.up { border-color: var(--up); }
+.sc.up b { color: var(--up); }
+.sc.down { border-color: var(--down); }
+.sc.down b { color: var(--down); }
+.dots { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 2px; }
+i.dot { display: inline-block; width: 11px; height: 11px; border-radius: 50%; vertical-align: -1px; }
+i.dot.in { background: var(--up); }
+i.dot.mid { background: var(--l2); }
+i.dot.out { background: var(--down); }
+i.dot.na { background: var(--line); }
+.prof { display: grid; grid-template-columns: repeat(24, 1fr); gap: 2px; height: 70px; align-items: end; margin-bottom: 16px; }
+.prof div { position: relative; height: 100%; display: flex; align-items: flex-end; }
+.prof b { display: block; width: 100%; background: color-mix(in srgb, var(--accent) 60%, transparent); border-radius: 2px 2px 0 0; }
+.prof span { position: absolute; bottom: -15px; left: 0; font-size: 10px; color: var(--muted); font-family: var(--mono); }
+.rgood { color: var(--up); }
+.rwarn { color: var(--l2); }
+.tile .tilep { margin: 6px 0 0; font-size: 13px; color: #cfd5df; line-height: 1.5; }

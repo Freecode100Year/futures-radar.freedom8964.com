@@ -29,7 +29,7 @@ export function parseTwelve(json) {
 }
 
 async function fetchYahoo(symbol, backfill) {
-  return (await fetchYahooBars(symbol, { interval: '60m', range: backfill ? '3mo' : '5d' })).map(({ ts, close }) => ({ ts, close }));
+  return (await fetchYahooBars(symbol, { interval: '60m', range: backfill ? '3mo' : '5d' })).map(({ ts, open, high, low, close }) => ({ ts, open, high, low, close }));
 }
 
 async function fetchTwelve(inst, backfill, apiKey) {
@@ -67,12 +67,14 @@ export async function fetchMarket(env, { backfill = false, group = null } = {}) 
     try {
       const active = await activeContract(env, inst.key);
       const { provider, contract, points } = await fetchSeries(env, inst, backfill, active);
-      // 只写新K线（以及最后一根可能未收盘的K线），避免每小时重写 5 天数据（D1 免费版每天只有 10 万行写入）
+      // 只重写最近 3 小时的K线，避免每次重写 5 天数据。
+      // 不能只写比库里最新时间更晚的点：Yahoo 最后一个点是带实时时间戳的未收盘K线（如 20:59:59），
+      // 这一小时收盘后，完整K线的时间戳是整点（20:00），比实时点早，按"更晚才写"会被永远跳过。
       const last = backfill ? null : (await env.DB.prepare('SELECT MAX(ts) AS t FROM prices WHERE instrument = ? AND contract = ?').bind(inst.key, contract).first())?.t;
-      const fresh = last ? points.filter((p) => p.ts >= last) : points;
-      const stmt = env.DB.prepare('INSERT OR REPLACE INTO prices (instrument, contract, ts, close) VALUES (?, ?, ?, ?)');
+      const fresh = last ? points.filter((p) => p.ts >= last - 3 * 3600) : points;
+      const stmt = env.DB.prepare('INSERT OR REPLACE INTO prices (instrument, contract, ts, open, high, low, close) VALUES (?, ?, ?, ?, ?, ?, ?)');
       for (let i = 0; i < fresh.length; i += 400) {
-        await env.DB.batch(fresh.slice(i, i + 400).map((p) => stmt.bind(inst.key, contract, p.ts, p.close)));
+        await env.DB.batch(fresh.slice(i, i + 400).map((p) => stmt.bind(inst.key, contract, p.ts, p.open ?? null, p.high ?? null, p.low ?? null, p.close)));
       }
       report.push({ instrument: inst.key, provider, contract, points: points.length, written: fresh.length });
     } catch (e) {

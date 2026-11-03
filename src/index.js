@@ -7,6 +7,7 @@ import { updateCurves, updateDailyBars } from './contracts.js';
 import { computeSnapshots, generateBrief, listInstruments, getInstrument, getOverview, ensureHistory, dataStatus } from './futures.js';
 import { updateCot } from './cot.js';
 import { upcomingEvents, addEvent } from './calendar.js';
+import { makeOutlooks, evaluateOutlooks, getOutlook, getHourly, outlookTrack, generateOutlookCommentary } from './outlook.js';
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -97,6 +98,16 @@ export default {
         const days = Math.min(Math.max(Number(url.searchParams.get('days') || 14), 1), 60);
         return json(await upcomingEvents(env, { days }));
       }
+      if (req.method === 'GET' && path === '/api/outlook') return json(await getOutlook(env));
+      if (req.method === 'GET' && path === '/api/outlook/track') {
+        const days = Math.min(Math.max(Number(url.searchParams.get('days') || 30), 1), 180);
+        return json(await outlookTrack(env, { days }));
+      }
+      const hm = path.match(/^\/api\/instruments\/([a-z0-9]+)\/hourly$/);
+      if (req.method === 'GET' && hm) {
+        const data = await getHourly(env, hm[1], { hours: Number(url.searchParams.get('hours') || 72) });
+        return data ? json(data) : json({ error: 'not found' }, 404);
+      }
       if (req.method === 'GET' && path === '/api/instruments') return json(await listInstruments(env));
       const im = path.match(/^\/api\/instruments\/([a-z0-9]+)$/);
       if (req.method === 'GET' && im) {
@@ -145,6 +156,12 @@ export default {
           return json({ cot: await updateCot(env, { weeks }), snapshots: await computeSnapshots(env) });
         }
         if (path === '/api/admin/llm/test') return json(await selfTest(env));
+        if (path === '/api/admin/outlook') {
+          const evaluated = await evaluateOutlooks(env);
+          const made = await makeOutlooks(env);
+          const ai = url.searchParams.get('ai') === '0' ? null : await generateOutlookCommentary(env).catch((e) => ({ error: e.message }));
+          return json({ evaluated, made, ai });
+        }
 
         if (path === '/api/admin/init') {
           await env.DB.batch(
@@ -185,7 +202,7 @@ export default {
     const h = t.getUTCHours();
     const wd = t.getUTCDay();
     const log = { cron: controller.cron, group, errors: {} };
-    const LOGGED = new Set(['market', 'curves', 'daily', 'cot', 'ensure_history', 'snapshots']);
+    const LOGGED = new Set(['market', 'curves', 'daily', 'cot', 'ensure_history', 'snapshots', 'outlook', 'outlook_eval']);
     const record = async (name, ok, detail) => {
       if (!LOGGED.has(name)) return;
       try {
@@ -210,7 +227,8 @@ export default {
     const r = await step('ingest', () => ingest(env));
     log.new_articles = r?.new_articles;
     log.analyses_queued = await step('schedule', () => scheduleAnalyses(env));
-    const market = await step('market', () => fetchMarket(env, { group }));
+    // 整点那次采集全部 12 个品种，让本小时的风险展望用上最新价格；其余三次各采集 3 个
+    const market = await step('market', () => fetchMarket(env, { group: group === 0 ? null : group }));
     log.market_errors = (market || []).filter((m) => m.error);
 
     // 美国期货日盘收盘后：22 点分 4 组更新期限结构（识别主力合约）和日线增量
@@ -228,6 +246,13 @@ export default {
       await step('snapshots', () => computeSnapshots(env));
     } else if (log.history?.changed) {
       await step('snapshots', () => computeSnapshots(env)); // 补到新数据就立即刷新，不等整点
+    }
+    // 风险展望：每次都核对已结束的窗口；整点生成本小时的区间，并排队生成 AI 情景解读
+    const nowSec = Math.floor(t.getTime() / 1000);
+    log.outlook_evaluated = (await step('outlook_eval', () => evaluateOutlooks(env, { nowSec })))?.length;
+    if (group === 0) {
+      const made = await step('outlook', () => makeOutlooks(env, { nowSec }));
+      if ((made || []).some((m) => m.status === 'open')) await step('outlook_queue', () => env.QUEUE.send({ type: 'outlook_ai', window_start: Math.floor(nowSec / 3600) * 3600, now_sec: nowSec }));
     }
     if (group === 0 && h === 4) await step('purge', () => purgeOld(env));
     if (h === 23 && group === 0) {
@@ -256,6 +281,17 @@ export default {
       } catch (err) {
         console.error('generateBrief', m.body.key, err);
         m.retry({ delaySeconds: 300 });
+      }
+    }
+    for (const m of batch.messages.filter((x) => x.body.type === 'outlook_ai')) {
+      try {
+        console.log(JSON.stringify({ outlook_ai: m.body.window_start, ...(await generateOutlookCommentary(env, { windowStart: m.body.window_start, nowSec: Math.max(m.body.now_sec || 0, Math.floor(Date.now() / 1000)) })) }));
+        m.ack();
+      } catch (err) {
+        console.error('outlook_ai', err);
+        // 窗口只有 1 小时，重试两次就放弃
+        if (m.attempts >= 3) m.ack();
+        else m.retry({ delaySeconds: 90 });
       }
     }
     for (const m of batch.messages.filter((x) => x.body.type === 'analyze')) {

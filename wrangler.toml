@@ -48,6 +48,7 @@ CHAIN_TRIAGE = "workersai,glm,groq,ollama,opencode,openrouter"
 CHAIN_ANALYSIS = "workersai,glm,ollama,opencode,openrouter"
 CHAIN_ANALYSIS_IMPORTANT = "workersai,glm,ollama,opencode,openrouter"
 CHAIN_BRIEF = "workersai,glm,ollama,groq,opencode,openrouter"
+CHAIN_OUTLOOK = "groq,glm,workersai,ollama,opencode,openrouter"   # 每小时风险情景（每天约 24 次）
 # 各家模型可单独覆盖：WORKERSAI_MODEL / GROQ_MODEL / GLM_MODEL / OLLAMA_MODEL / OPENCODE_MODEL / OPENROUTER_MODEL
 WORKERSAI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8"
 GROQ_MODEL = "llama-3.3-70b-versatile"

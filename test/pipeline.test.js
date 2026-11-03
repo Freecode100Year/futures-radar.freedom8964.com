@@ -164,9 +164,9 @@ test('完整流程', async () => {
   const expected = 2 * (2000 * 0.1 + 150 * 0.5) / 1e6 + (15000 * 2 + 4000 * 10 + 3000 * 0.1) / 1e6;
   assert.ok(Math.abs(Object.values(usage.by_day)[0] - expected) < 1e-4, JSON.stringify(usage.by_day));
 
-  // 行情增量写入：再抓一次，每个品种只写最后一根K线
+  // 行情增量写入：再抓一次，每个品种只重写最近 3 小时（小时线最多 4 根），而不是整个 5 天
   const again = await (await call(env, '/api/admin/market/fetch', admin)).json();
-  assert.ok(again.filter((r) => !r.error).every((r) => r.written <= 1), JSON.stringify(again.map((r) => r.written)));
+  assert.ok(again.filter((r) => !r.error).every((r) => r.written <= 4), JSON.stringify(again.map((r) => r.written)));
 
   // 重新分析门槛：新增 1 篇不触发，累计新增 3 篇才触发
   const addArticle = (n) => env.DB.prepare(

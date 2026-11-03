@@ -66,7 +66,7 @@ const SCALE = { d1: 3, w1: 6, m1: 10, m3: 18, ytd: 30, y1: 40 };
 async function renderOverview() {
   const el = $('#detail');
   el.innerHTML = '<div class="empty">加载中…</div>';
-  const ov = await fetchOverview();
+  const [ov, ol] = await Promise.all([fetchOverview(), fetchOutlook().catch(() => null)]);
   if (!ov) {
     el.innerHTML = '<div class="empty">暂无数据</div>';
     return;
@@ -100,6 +100,8 @@ async function renderOverview() {
       }).join('')}</tbody>
     </table></div>
   </div>
+
+  ${outlookOverviewHtml(ol, new Set(rows.map((i) => i.key)))}
 
   <div class="grid2">
     <div class="box"><h4>价差与比价 <span class="note">近 1 年</span></h4>

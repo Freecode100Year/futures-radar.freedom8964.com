@@ -235,5 +235,8 @@ export async function purgeOld(env) {
   await env.DB.batch([
     env.DB.prepare('UPDATE articles SET content = NULL WHERE content IS NOT NULL AND fetched_at < ?').bind(contentCutoff),
     env.DB.prepare('DELETE FROM prices WHERE ts < ?').bind(priceCutoff),
+    // 小时展望及其核对结果保留一年（命中率统计只用近 30–180 天）
+    env.DB.prepare('DELETE FROM hourly_outlook WHERE window_start < ?').bind(Math.floor(Date.now() / 1000) - 366 * 86400),
+    env.DB.prepare('DELETE FROM hourly_commentary WHERE window_start < ?').bind(Math.floor(Date.now() / 1000) - 30 * 86400),
   ]);
 }
