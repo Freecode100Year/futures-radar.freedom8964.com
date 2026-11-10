@@ -53,7 +53,7 @@ CHAIN_OUTLOOK = "groq,gemini,glm,ollama,opencode,openrouter,workersai"   # 每�
 # 各家模型可单独覆盖：WORKERSAI_MODEL / GEMINI_MODEL / GROQ_MODEL / GLM_MODEL / OLLAMA_MODEL / OPENCODE_MODEL / OPENROUTER_MODEL
 WORKERSAI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8"
 GEMINI_MODEL = "gemini-3.1-flash-lite"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-120b"   # Llama 3.3 70B 已于 2026-08-16 关停
 GLM_MODEL = "glm-4.7-flash"
 OPENCODE_MODEL = "deepseek-v4.1-flash-free"
 OPENROUTER_MODEL = "openrouter/free"

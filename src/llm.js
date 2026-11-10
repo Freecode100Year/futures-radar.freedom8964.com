@@ -27,15 +27,18 @@ export const PROVIDERS = {
     // 默认每天 400 次（给 500 留余量），实际额度以 AI Studio 的 Rate limit 页面为准，用 GEMINI_DAILY_REQUESTS 调整。
     model: 'gemini-3.1-flash-lite', modelEnv: 'GEMINI_MODEL', caps: { requests: 400 },
   },
+  // Groq 的 Llama 3.1 8B / 3.3 70B 已于 2026-08-16 对免费档关停，按官方建议换成 gpt-oss。
+  // 免费档（2026-11）：每个模型 30 次/分钟、1000 次/天、8000 token/分钟（提示 + 输出都算）、20 万 token/天。
+  // gpt-oss 是推理模型，reasoning_effort 设为 low，省 token、少超时。
   'groq-fast': {
-    label: 'Groq Llama 3.1 8B', kind: 'openai', url: 'https://api.groq.com/openai/v1/chat/completions',
-    keyEnv: 'GROQ_API_KEY', model: 'llama-3.1-8b-instant', modelEnv: 'GROQ_FAST_MODEL',
-    caps: { requests: 14000, tokens: 480000 }, maxPromptTokens: 4500, jsonMode: true,
+    label: 'Groq GPT-OSS 20B', kind: 'openai', url: 'https://api.groq.com/openai/v1/chat/completions',
+    keyEnv: 'GROQ_API_KEY', model: 'openai/gpt-oss-20b', modelEnv: 'GROQ_FAST_MODEL',
+    caps: { requests: 1000, tokens: 190000 }, maxPromptTokens: 4000, jsonMode: true, extra: { reasoning_effort: 'low' },
   },
   groq: {
-    label: 'Groq Llama 3.3 70B', kind: 'openai', url: 'https://api.groq.com/openai/v1/chat/completions',
-    keyEnv: 'GROQ_API_KEY', model: 'llama-3.3-70b-versatile', modelEnv: 'GROQ_MODEL',
-    caps: { requests: 1000, tokens: 95000 }, maxPromptTokens: 9000, jsonMode: true,
+    label: 'Groq GPT-OSS 120B', kind: 'openai', url: 'https://api.groq.com/openai/v1/chat/completions',
+    keyEnv: 'GROQ_API_KEY', model: 'openai/gpt-oss-120b', modelEnv: 'GROQ_MODEL',
+    caps: { requests: 1000, tokens: 190000 }, maxPromptTokens: 5000, jsonMode: true, extra: { reasoning_effort: 'low' },
   },
   glm: {
     label: '智谱 GLM-4.7-Flash', kind: 'openai', url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',

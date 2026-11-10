@@ -80,3 +80,28 @@ test('trackRecordBefore：只用 72 小时核对窗口已结束的事件，用�
   assert.equal(record.length, 2); // 10 小时前的还没核对完
   assert.deepEqual(record.map((r) => r.verdict), ['miss', 'hit']);
 });
+
+// 事件分析失败的重试：30 分钟 → 2 小时 → 6 小时，之后确认消息并标回"待分析"
+import worker, { ANALYZE_RETRY_DELAYS } from '../src/index.js';
+import { makeEnv } from './mock-env.js';
+
+test('分析失败按 30 分钟 / 2 小时 / 6 小时重试，第 4 次失败交回调度器', async () => {
+  assert.deepEqual(ANALYZE_RETRY_DELAYS, [1800, 7200, 21600]);
+  const env = makeEnv();
+  // 让 runAnalysis 抛错：DB 查询事件时直接失败
+  const calls = [];
+  const realPrepare = env.DB.prepare.bind(env.DB);
+  env.DB.prepare = (sql) => {
+    if (/SELECT \* FROM events WHERE id = \?/.test(sql)) return { bind: () => ({ first: async () => { throw new Error('所有模型都失败'); } }) };
+    if (/UPDATE events SET needs_analysis = 1/.test(sql)) return { bind: (id) => ({ run: async () => { calls.push(id); return {}; } }) };
+    return realPrepare(sql);
+  };
+  for (const attempts of [1, 2, 3, 4]) {
+    const seen = {};
+    const msg = { body: { type: 'analyze', id: 42 }, attempts, ack() { seen.ack = true; }, retry(o) { seen.retry = o; } };
+    await worker.queue({ messages: [msg] }, env);
+    if (attempts <= 3) assert.deepEqual(seen, { retry: { delaySeconds: ANALYZE_RETRY_DELAYS[attempts - 1] } });
+    else assert.deepEqual(seen, { ack: true });
+  }
+  assert.deepEqual(calls, [42]);
+});

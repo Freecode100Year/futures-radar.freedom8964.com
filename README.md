@@ -166,8 +166,8 @@ Yahoo 期货合约日线 ─► 期限结构 + 识别主力合约 ─► 主力�
 | 提供商 | 默认模型 | 免费额度（2026-11 核对，以各家控制台为准） | 路由里的保护 |
 |---|---|---|---|
 | Workers AI | `@cf/qwen/qwen3-30b-a3b-fp8` | 10,000 Neurons/天 | 估算 Neurons，用到 8,000 就停 |
-| Groq（快） | `llama-3.1-8b-instant` | 14,400 次/天、每分钟 6K token | 提示超过 4.5K token 不发 |
-| Groq | `llama-3.3-70b-versatile` | 1,000 次/天、10 万 token/天、每分钟 12K token | 每天 9.5 万 token 封顶；提示超过 9K 不发 |
+| Groq（快） | `openai/gpt-oss-20b` | 1,000 次/天、20 万 token/天、每分钟 8K token | 每天 19 万 token 封顶；提示超过 4K token 不发（Llama 3.1 8B 已于 2026-08-16 关停） |
+| Groq | `openai/gpt-oss-120b` | 1,000 次/天、20 万 token/天、每分钟 8K token | 每天 19 万 token 封顶；提示超过 5K 不发（Llama 3.3 70B 已于 2026-08-16 关停） |
 | 智谱 | `glm-4.7-flash` | 免费，按并发限流 | 限流后按 Retry-After 冷却 |
 | Ollama Cloud | `deepseek-v4-flash` | 免费版有用量上限 | 默认每天 300 次（可调） |
 | OpenCode Zen | `deepseek-v4-flash-free` | 免费模型 | 默认每天 200 次（可调） |

@@ -84,6 +84,9 @@ async function getEvent(env, id) {
   };
 }
 
+/** 事件分析失败后的重试间隔（秒），对应第 1、2、3 次失败；之后交回调度器 */
+export const ANALYZE_RETRY_DELAYS = [1800, 7200, 21600];
+
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
@@ -367,8 +370,15 @@ export default {
         console.log(JSON.stringify({ analyze: m.body.id, ...(await runAnalysis(env, m.body.id)) }));
         m.ack();
       } catch (err) {
-        console.error('runAnalysis', m.body.id, err);
-        m.retry({ delaySeconds: 120 });
+        console.error('runAnalysis', m.body.id, 'attempt', m.attempts, err);
+        // 失败多半是免费额度用完或限流，2 分钟后重试只会再耗一遍额度。按 30 分钟 → 2 小时 → 6 小时逐步拉长；
+        // 队列最多重试 3 次，最后一次也失败就确认消息，把事件标回"待分析"，等调度器在额度恢复后重新排队（不会丢）。
+        const delay = ANALYZE_RETRY_DELAYS[m.attempts - 1];
+        if (delay) m.retry({ delaySeconds: delay });
+        else {
+          m.ack();
+          await env.DB.prepare('UPDATE events SET needs_analysis = 1 WHERE id = ?').bind(m.body.id).run().catch(() => {});
+        }
       }
     }
   },
