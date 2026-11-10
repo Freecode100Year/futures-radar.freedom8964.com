@@ -82,7 +82,7 @@ const summary = (xs) => {
   const hits = calls.filter((x) => (x.p > 0.5 ? 1 : -1) === x.dir).length;
   return { n: ev.length, brier, calls: calls.length, rate: calls.length ? hits / calls.length : NaN };
 };
-const latest = Math.max(...Object.values(Object.values(res)[0]).flat().map((x) => x.t));
+const latest = Object.values(Object.values(res)[0]).flat().reduce((m, x) => Math.max(m, x.t), 0);
 console.log('做法                 样本    Brier   表态次数  命中率 | 近6个月 Brier  命中率');
 for (const [name, byInst] of Object.entries(res)) {
   const all = Object.values(byInst).flat();

@@ -16,7 +16,7 @@ import { etParts } from './sessions.js';
 
 const HOUR = 3600;
 const FEATURES = ['r1', 'r3', 'r6', 'r24', 'dev', 'tod'];
-const LAMBDA = 30; // 正则化强度：样本里的偶然规律不该让概率偏离 50% 太多
+const LAMBDA = 100; // 正则化强度：样本里的偶然规律不该让概率偏离 50% 太多（两年回测：30 → 100 配合概率校准，Brier 0.2522 → 0.2499）
 const MIN_SAMPLES = 300;
 
 const etHour = (sec) => Math.floor(etParts(new Date(sec * 1000)).minute / 60);

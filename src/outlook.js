@@ -15,7 +15,7 @@ import { upcomingEvents } from './calendar.js';
 import { generate, chainFor } from './llm.js';
 import { relatedEvents } from './futures.js';
 import { quotesWithStatus } from './quotes.js';
-import { predictDirection, actualDirection, NO_CALL } from './predict.js';
+import { predictDirection, actualDirection, NO_CALL, calibrateProb, CALIB_WINDOW } from './predict.js';
 
 const HOUR = 3600;
 const DAY = 86400;
@@ -248,6 +248,18 @@ export async function loadScale(env, key) {
   }
 }
 
+/** 概率校准用的历史：最近已核对窗口的原始概率（新版存在 p_raw；旧窗口当时没校准，p_up 就是原始概率）和实际涨跌 */
+export async function loadCalibHistory(env, key) {
+  try {
+    const { results } = await env.DB.prepare(
+      'SELECT p_up, dir_actual, events FROM hourly_outlook WHERE instrument = ? AND p_up IS NOT NULL AND dir_actual IS NOT NULL AND dir_actual != 0 ORDER BY window_start DESC LIMIT ?',
+    ).bind(key, CALIB_WINDOW).all();
+    return results.reverse().map((r) => ({ p: parse(r.events, {}).p_raw ?? r.p_up, y: r.dir_actual > 0 ? 1 : 0 }));
+  } catch {
+    return [];
+  }
+}
+
 /** 每整点：为所有开盘品种生成本小时的展望 */
 export async function makeOutlooks(env, { nowSec = Math.floor(Date.now() / 1000) } = {}) {
   const events = await upcomingEvents(env, { nowMs: (nowSec - 4 * HOUR) * 1000, days: 1 });
@@ -262,11 +274,13 @@ export async function makeOutlooks(env, { nowSec = Math.floor(Date.now() / 1000)
       let pred = null;
       if (o.status === 'open') {
         pred = predictDirection(rows.filter((r) => r.ts + HOUR <= nowSec), o.window_start); // 只用已收盘的小时K线
+        // 概率校准：按本品种过去的（原始概率, 实际涨跌）把概率收缩到实际能兑现的程度；原始概率另存为 p_raw
+        if (pred) pred = { ...pred, p_raw: pred.p_up, p_up: calibrateProb(pred.p_up, await loadCalibHistory(env, inst.key)) };
         await env.DB.prepare(
           `INSERT OR REPLACE INTO hourly_outlook (instrument, window_start, made_at, contract, base_price, base_ts, horizon_h, sigma_pct, lo68, hi68, lo95, hi95, events, regime, p_up, naive_dir)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(inst.key, o.window_start, o.made_at, contract, o.base_price, o.base_ts, o.horizon_h, o.sigma_pct, o.lo68, o.hi68, o.lo95, o.hi95,
-          JSON.stringify({ list: o.events, adj: o.event_adj, w68: o.width68_pct, w95: o.width95_pct, b68: o.base68, b95: o.base95, scale: o.scale, stale_min: o.stale_min, features: pred?.features }), o.regime,
+          JSON.stringify({ list: o.events, adj: o.event_adj, w68: o.width68_pct, w95: o.width95_pct, b68: o.base68, b95: o.base95, scale: o.scale, stale_min: o.stale_min, features: pred?.features, p_raw: pred?.p_raw }), o.regime,
           pred?.p_up ?? null, pred?.naive_dir ?? null).run();
       }
       out.push({ instrument: inst.key, status: o.status, ...(o.status === 'open' ? { w68: o.width68_pct, events: o.events.length, p_up: pred?.p_up ?? null } : { reason: o.reason }) });
