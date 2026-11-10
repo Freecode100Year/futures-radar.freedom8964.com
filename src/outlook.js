@@ -2,7 +2,8 @@
 //
 // 展望给的是统计区间，不是涨跌预测：
 //   1. 用近约 70 天的小时收益率，按美东时段（0–23 点）分别估计波动率；样本少的时段向整体波动率收缩。
-//   2. 近 24 小时实际波动 / 长期波动 = 波动状态系数（限制在 0.7–1.6），放大或缩小区间。
+//   2. 近 24 小时实际波动 / 长期波动 = 波动状态系数（限制在 0.85–2.5），放大或缩小区间。
+//   2b. 自适应校准：按该品种最近 300 个已核对窗口的实际命中情况，把区间整体放宽或收窄（intervalScale）。
 //   3. 窗口内有数据发布（EIA、USDA 等）时，改用历史上"同一星期几、同一小时"的波动率（不低于平常时段）。
 //   4. 区间宽度用标准化收益率的经验分位数（而不是正态分布的 1σ/2σ），这样肥尾也能体现出来。
 //   5. 窗口结束后用实际价格核对是否落在区间内，公开命中率：68% 区间长期命中率应接近 68%。
@@ -111,9 +112,12 @@ export function hourStats(rows) {
   const dayHour = Object.fromEntries(Object.entries(byDayHour).map(([k, xs]) => [k, { n: xs.length, sigma: rms(xs) }]));
   const z = rets.map((x) => Math.abs(x.r / hour[etHour(x.ts)].sigma)).sort((a, b) => a - b);
   const recent = rets.slice(-24).map((x) => clip(x.r) / hour[etHour(x.ts)].sigma);
-  const regime = recent.length >= 12 ? Math.min(1.6, Math.max(0.7, rms(recent))) : 1;
+  const rawRegime = recent.length >= 12 ? rms(recent) : 1;
+  // 回测（两年、12 个品种）：原来的 0.7–1.6 在平静时把区间收得太窄、剧烈时放得不够，改为 0.85–2.5
+  const regime = Math.min(2.5, Math.max(0.85, rawRegime));
   return {
     n: rets.length,
+    raw_regime: rawRegime,
     sigma_all: all,
     hour,
     dayHour,
@@ -121,6 +125,20 @@ export function hourStats(rows) {
     q95: z.length >= 200 ? quantile(z, 0.9545) : 1.96,
     regime,
   };
+}
+
+/**
+ * 自适应校准（共形校准）：看该品种最近已核对的窗口，实际涨跌落在"校准前区间"内的比例是否达标，
+ * 不达标就按需要的倍数放宽或收窄。past: [{ r: 实际对数收益, b68, b95: 校准前的半宽（对数） }]，按时间顺序。
+ * 样本少时向 1 收缩；倍数限制在 0.8–1.6，避免个别极端窗口把区间拉得过宽。
+ */
+export const SCALE_WINDOW = 300;
+export function intervalScale(past) {
+  const xs = past.slice(-SCALE_WINDOW).filter((p) => Number.isFinite(p.r) && p.b68 > 0 && p.b95 > 0);
+  if (xs.length < 60) return { k68: 1, k95: 1, n: xs.length };
+  const need = (key, q) => quantile(xs.map((p) => Math.abs(p.r) / p[key]).sort((a, b) => a - b), q);
+  const shrink = (k) => Math.min(1.6, Math.max(0.8, 1 + (k - 1) * (xs.length / (xs.length + 50))));
+  return { k68: shrink(need('b68', 0.6827)), k95: shrink(need('b95', 0.9545)), n: xs.length };
 }
 
 /** 窗口内是否开盘（看窗口里每 5 分钟） */
@@ -144,7 +162,7 @@ function eventsFor(key, events, from, to) {
  * 计算一个品种的未来一小时展望。
  * @returns {{status:'open'|'closed'|'nodata', ...}}
  */
-export function computeOutlook(inst, rows, { nowSec, events = [], stats = hourStats(rows), latest = null }) {
+export function computeOutlook(inst, rows, { nowSec, events = [], stats = hourStats(rows), latest = null, scale = { k68: 1, k95: 1, n: 0 } }) {
   const windowStart = Math.floor(nowSec / HOUR) * HOUR;
   const windowEnd = windowStart + HOUR;
   const session = inst.spec.session;
@@ -184,8 +202,9 @@ export function computeOutlook(inst, rows, { nowSec, events = [], stats = hourSt
   }
   const sigma = Math.sqrt(variance);
   const band = (q) => [base.close * Math.exp(-q * sigma), base.close * Math.exp(q * sigma)];
-  const [lo68, hi68] = band(stats.q68);
-  const [lo95, hi95] = band(stats.q95);
+  const q68 = stats.q68 * scale.k68, q95 = stats.q95 * scale.k95;
+  const [lo68, hi68] = band(q68);
+  const [lo95, hi95] = band(q95);
   return {
     ...base0,
     status: 'open',
@@ -196,14 +215,37 @@ export function computeOutlook(inst, rows, { nowSec, events = [], stats = hourSt
     sigma_pct: round(sigma * 100, 4),
     lo68: round(lo68, 6), hi68: round(hi68, 6),
     lo95: round(lo95, 6), hi95: round(hi95, 6),
-    width68_pct: round(stats.q68 * sigma * 100, 3),
-    width95_pct: round(stats.q95 * sigma * 100, 3),
+    width68_pct: round(q68 * sigma * 100, 3),
+    width95_pct: round(q95 * sigma * 100, 3),
+    // 校准前的半宽（对数），供以后的自适应校准使用
+    base68: round(stats.q68 * sigma, 6),
+    base95: round(stats.q95 * sigma, 6),
+    scale: { k68: round(scale.k68, 3), k95: round(scale.k95, 3), n: scale.n },
     regime: round(stats.regime, 2),
     event_adj: eventAdj,
     events: evs.map((e) => ({ ts: e.ts, title: e.title, importance: e.importance })),
     samples: stats.n,
     stale_min: Math.round((nowSec - base.t) / 60),
   };
+}
+
+/**
+ * 读取该品种最近已核对的窗口，算自适应校准倍数。
+ * 新版窗口记录了校准前半宽 b68/b95；旧窗口没有，就用当时的实际半宽（当时没有校准，两者相同）。
+ */
+export async function loadScale(env, key) {
+  try {
+    const { results } = await env.DB.prepare(
+      'SELECT base_price, actual, events FROM hourly_outlook WHERE instrument = ? AND actual IS NOT NULL AND base_price > 0 ORDER BY window_start DESC LIMIT ?',
+    ).bind(key, SCALE_WINDOW).all();
+    const past = results.reverse().map((r) => {
+      const ex = parse(r.events, {});
+      return { r: Math.log(r.actual / r.base_price), b68: ex.b68 ?? (ex.w68 > 0 ? ex.w68 / 100 : null), b95: ex.b95 ?? (ex.w95 > 0 ? ex.w95 / 100 : null) };
+    });
+    return intervalScale(past);
+  } catch {
+    return { k68: 1, k95: 1, n: 0 };
+  }
 }
 
 /** 每整点：为所有开盘品种生成本小时的展望 */
@@ -216,7 +258,7 @@ export async function makeOutlooks(env, { nowSec = Math.floor(Date.now() / 1000)
       const { contract, rows } = await loadHourly(env, inst.key, nowSec - HISTORY_DAYS * DAY);
       const q = quotes[inst.key];
       const latest = q && q.contract === contract && q.market_time ? { t: Math.floor(Date.parse(q.market_time) / 1000), close: q.price } : null;
-      const o = computeOutlook(inst, rows, { nowSec, events, latest });
+      const o = computeOutlook(inst, rows, { nowSec, events, latest, scale: await loadScale(env, inst.key) });
       let pred = null;
       if (o.status === 'open') {
         pred = predictDirection(rows.filter((r) => r.ts + HOUR <= nowSec), o.window_start); // 只用已收盘的小时K线
@@ -224,7 +266,7 @@ export async function makeOutlooks(env, { nowSec = Math.floor(Date.now() / 1000)
           `INSERT OR REPLACE INTO hourly_outlook (instrument, window_start, made_at, contract, base_price, base_ts, horizon_h, sigma_pct, lo68, hi68, lo95, hi95, events, regime, p_up, naive_dir)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(inst.key, o.window_start, o.made_at, contract, o.base_price, o.base_ts, o.horizon_h, o.sigma_pct, o.lo68, o.hi68, o.lo95, o.hi95,
-          JSON.stringify({ list: o.events, adj: o.event_adj, w68: o.width68_pct, w95: o.width95_pct, stale_min: o.stale_min, features: pred?.features }), o.regime,
+          JSON.stringify({ list: o.events, adj: o.event_adj, w68: o.width68_pct, w95: o.width95_pct, b68: o.base68, b95: o.base95, scale: o.scale, stale_min: o.stale_min, features: pred?.features }), o.regime,
           pred?.p_up ?? null, pred?.naive_dir ?? null).run();
       }
       out.push({ instrument: inst.key, status: o.status, ...(o.status === 'open' ? { w68: o.width68_pct, events: o.events.length, p_up: pred?.p_up ?? null } : { reason: o.reason }) });
@@ -415,6 +457,24 @@ export async function commentaryTargets(env, rows, { ws, nowSec }) {
   return { targets: Object.keys(reasons), reasons };
 }
 
+/** AI 自己近 30 天的方向判断战绩，写进提示词（第 4 步：让 AI 知道自己的偏向和命中率） */
+export async function aiRecordText(env, nowSec) {
+  try {
+    const { results } = await env.DB.prepare(
+      "SELECT ai_lean, ai_hit FROM hourly_outlook WHERE window_start >= ? AND ai_lean IN ('偏涨', '偏跌') AND ai_hit IS NOT NULL",
+    ).bind(nowSec - 30 * DAY).all();
+    if (!results.length) return '你的方向判断战绩：近 30 天还没有可核对的记录。';
+    const part = (lean) => {
+      const xs = results.filter((r) => r.ai_lean === lean);
+      return `判${lean} ${xs.length} 次、对 ${xs.filter((r) => r.ai_hit === 1).length} 次`;
+    };
+    const hits = results.filter((r) => r.ai_hit === 1).length;
+    return `你的方向判断战绩（近 30 天，"中性"和持平不计）：${part('偏涨')}；${part('偏跌')}；总命中率 ${Math.round((hits / results.length) * 100)}%（随机猜是 50%）。`;
+  } catch {
+    return '';
+  }
+}
+
 export const OUTLOOK_SCHEMA = {
   type: 'object',
   properties: {
@@ -445,7 +505,8 @@ const OUTLOOK_SYSTEM = `你是国际期货市场分析员，为中文读者写"�
 2. 上行情景和下行情景都要写，说清"如果发生什么，可能怎样"。
 3. 方向判断（lean）：结合新闻、数据发布和近几小时走势，给出偏涨、偏跌或中性。1 小时内的价格变动大部分是噪音，没有明确依据就选"中性"，不要为了表态而表态；也不要照抄统计模型的结果，它只是参考。你的每一次判断都会被公开核对命中率。
 4. 不给交易建议：不要出现买入、卖出、做多、做空、开仓、平仓、加仓、减仓、止损、止盈、目标价等词语，也不要给出具体的预测价格。
-5. 每个品种一条，简体中文，简短。`;
+5. 用户消息末尾附有你自己近 30 天方向判断的战绩（偏涨/偏跌各多少次、对了多少次）。如果你的命中率不高于 52%，或者明显偏向某一个方向，说明你在没有真实依据时也在表态：这时除非本小时有数据发布或直接相关的新闻，否则一律选"中性"。
+6. 每个品种一条，简体中文，简短。`;
 
 // 方向判断用 lean 字段表达；文字里出现交易指令类词语的条目整条丢弃
 const BANNED = /(买入|卖出|做多|做空|开仓|建仓|平仓|加仓|减仓|止损|止盈|抄底|逃顶|目标价)/;
@@ -473,7 +534,7 @@ export async function generateOutlookCommentary(env, { windowStart, nowSec = Mat
       + `统计模型上涨概率 ${r.p_up !== null && r.p_up !== undefined ? Math.round(r.p_up * 100) + '%' : '暂无'}；`
       + `数据发布：${(ex.list || []).map((e) => e.title).join('、') || '无'}；相关新闻：${news.map((n) => `${n.title}（${n.direction}）`).join('；') || '无'}`);
   }
-  const user = `窗口：${new Date(ws * 1000).toISOString()} 起 1 小时（UTC）。\n${lines.join('\n')}\n\n请为以上每个品种各写一条情景。`;
+  const user = `窗口：${new Date(ws * 1000).toISOString()} 起 1 小时（UTC）。\n${lines.join('\n')}\n\n${await aiRecordText(env, nowSec)}\n\n请为以上每个品种各写一条情景。`;
   const r = await generate(env, { chain: chainFor(env, 'outlook'), purpose: 'outlook', maxTokens: 2500, toolName: 'hourly_outlook', schema: OUTLOOK_SCHEMA, system: OUTLOOK_SYSTEM, user });
   const valid = new Set(results.map((x) => x.instrument));
   const seen = new Set();

@@ -12,8 +12,19 @@ function probBar(p) {
   return `<span class="pbar" title="统计模型：上涨概率 ${Math.round(p * 100)}%"><i style="${up ? 'left:50%' : `left:${50 - w}%`};width:${w}%;background:var(${up ? '--up' : '--down'})"></i></span><span class="mono small ${Math.abs(p - 0.5) < 0.02 ? 'note' : up ? 'up' : 'down'}">${lbl}</span>`;
 }
 const LEAN_CLS = { 偏涨: 'up', 偏跌: 'down', 中性: 'flat' };
-function leanChip(ai) {
+// AI 方向判断：近 30 天至少 100 次表态、命中率不低于 52% 才作为预测展示；否则标"试验中"（照常记录和公开核对）
+const AI_MIN_CALLS = 100, AI_MIN_RATE = 0.52;
+function aiTrusted(track) {
+  const a = track?.overall?.direction?.ai;
+  return !!a && a.calls >= AI_MIN_CALLS && a.rate >= AI_MIN_RATE;
+}
+function leanChip(ai, trusted = true, track = null) {
   if (!ai?.lean) return '<span class="note">—</span>';
+  if (!trusted) {
+    const a = track?.overall?.direction?.ai;
+    const why = `AI 方向判断近 30 天命中率 ${a?.rate !== undefined && a?.rate !== null ? Math.round(a.rate * 100) + '%' : '—'}（${a?.calls ?? 0} 次），还没有稳定超过随机猜，暂作试验、不作为预测。AI 原判断：${ai.lean}。${ai.reason || ''}`;
+    return `<span class="lean flat" title="${esc(why)}">试验中<em>${esc(ai.lean)}</em></span>`;
+  }
   return `<span class="lean ${LEAN_CLS[ai.lean] || 'flat'}" title="${esc(ai.reason || '')}">${esc(ai.lean)}${ai.confidence ? `<em>${esc(ai.confidence)}</em>` : ''}</span>`;
 }
 
@@ -56,7 +67,7 @@ function outlookOverviewHtml(ol, visibleKeys) {
       <td>${rangeBar(o)}</td>
       <td class="r mono">${pctTxt(o.width68_pct)}<div class="note small">95% ${pctTxt(o.width95_pct)}</div></td>
       <td class="pcell">${probBar(o.p_up)}</td>
-      <td>${leanChip(o.ai)}</td>
+      <td>${leanChip(o.ai, aiTrusted(ol.track), ol.track)}</td>
       <td>${ev || '<span class="note">—</span>'}${o.regime >= 1.25 ? ' <span class="evchip hot" title="近 24 小时实际波动高于长期水平">波动偏高</span>' : ''}</td>
       <td class="aiw">${o.ai ? esc(o.ai.watch) : '<span class="note">—</span>'}</td>
     </tr>`;
@@ -108,7 +119,7 @@ async function loadHourlyBox(inst, detail = null) {
     </div>
     ${levelsBox(detail, o, last)}
     <div class="grid2">
-      <div class="box"><h4>未来一小时风险展望 <span class="nb">不构成投资建议</span></h4>${outlookCard(o, d.session_open)}</div>
+      <div class="box"><h4>未来一小时风险展望 <span class="nb">不构成投资建议</span></h4>${outlookCard(o, d.session_open, d.track)}</div>
       <div class="box"><h4>区间命中记录 <span class="note">近 30 天 · 本品种</span></h4>${trackCard(tr, d.history)}${profileChart(d.hour_profile)}</div>
     </div>`;
   const show = async (tf) => {
@@ -140,7 +151,7 @@ function hourGrid(cs) {
     <p class="note small">逐时涨跌（本地时间，按开盘时刻标注；* 为尚未收盘的一小时）。</p>`;
 }
 
-function outlookCard(o, open) {
+function outlookCard(o, open, track = null) {
   if (!o) return `<p class="note">${open ? '本小时的区间将在整点后几分钟内生成。' : '本小时休市，开盘后的第一个整点开始生成。'}</p>`;
   const ai = o.ai;
   return `<div class="olc">
@@ -154,7 +165,7 @@ function outlookCard(o, open) {
     </tbody></table>
     <div class="dirbox">
       <div><span class="note">统计模型</span> ${probBar(o.p_up)}</div>
-      <div><span class="note">AI 判断</span> ${leanChip(ai)} ${ai?.reason ? `<span class="small">${esc(ai.reason)}</span>` : ''}</div>
+      <div><span class="note">AI 判断</span> ${leanChip(ai, aiTrusted(track), track)} ${ai?.reason && aiTrusted(track) ? `<span class="small">${esc(ai.reason)}</span>` : ''}</div>
       <p class="note small">${DIR_NOTE}</p>
     </div>
     ${ai ? `<div class="scen">

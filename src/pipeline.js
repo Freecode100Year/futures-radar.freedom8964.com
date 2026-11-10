@@ -3,7 +3,7 @@ import { parseFeed, parseGdelt } from './rss.js';
 import { extractArticleText } from './extract.js';
 import { triageEvent, analyzeEvent } from './analyze.js';
 import { levelOf } from './rubric.js';
-import { calibrateEvents } from './market.js';
+import { calibrateEvents, marketContext } from './market.js';
 
 const now = () => new Date().toISOString();
 const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
@@ -209,7 +209,7 @@ export async function runAnalysis(env, eventId, { force = false } = {}) {
   // 重要事件（粗分高或此前已判为严重）走 analysis_important 调用链（有 Anthropic key 时先用 Sonnet），
   // 其余走 analysis 调用链（免费模型优先）。付费模型受 DAILY_BUDGET_USD 约束，由路由层自动跳过。
   const important = triage.rough_severity >= num(env.DEEP_MODEL_MIN_SEVERITY, 4) || (ev.severity ?? 0) >= 60;
-  const result = await analyzeEvent(env, articles, ts, important ? 'analysis_important' : 'analysis');
+  const result = await analyzeEvent(env, articles, ts, important ? 'analysis_important' : 'analysis', await marketContext(env));
   await env.DB.batch([
     env.DB.prepare('INSERT INTO analyses (event_id, created_at, model, severity, scores, payload) VALUES (?, ?, ?, ?, ?, ?)')
       .bind(eventId, ts, result.model, result.severity, JSON.stringify(result.scores), JSON.stringify(result)),

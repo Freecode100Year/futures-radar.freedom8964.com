@@ -189,8 +189,9 @@ const SYSTEM = `你是资深的国际期货市场分析师，覆盖能源（原�
 5. 严格按下列刻度打分，不要因为新闻措辞激烈就抬高分数：
 ${rubricText()}
 6. 资产影响里的期货方向预测会在事后与主力合约的实际行情逐一核对（4/24/72 小时）。只列你有把握的品种，方向拿不准就填“不确定”，不要为凑数而列。
-7. 这是事件影响分析，不是交易建议：不要给出买卖、目标价、止损或仓位建议。
-8. 除 quote 外一律用简体中文输出。`;
+7. 用户消息末尾附有各品种最近 4/24 小时的实际涨跌，以及你过去对各品种方向判断的战绩。新闻常常滞后于行情：价格在报道出来前可能已经反映了消息，之后 24–72 小时回落很常见。如果价格已经朝你预期的方向大幅移动，或你过去对该品种该方向的命中率明显低于一半，方向应填"不确定"或"波动加剧"。
+8. 这是事件影响分析，不是交易建议：不要给出买卖、目标价、止损或仓位建议。
+9. 除 quote 外一律用简体中文输出。`;
 
 const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
 
@@ -206,9 +207,10 @@ export function buildSourceBlock(articles, MAX_SOURCES = 15, MAX_CHARS = 2000) {
 }
 
 /** task: 'analysis' | 'analysis_important'，决定使用哪条调用链 */
-export async function analyzeEvent(env, articles, nowIso, task = 'analysis') {
+export async function analyzeEvent(env, articles, nowIso, task = 'analysis', marketContext = '') {
   const sources = buildSourceBlock(articles, num(env.MAX_SOURCES, 15), num(env.MAX_SOURCE_CHARS, 2000));
-  const user = `当前时间: ${nowIso}\n\n${sources.map((s) => s.text).join('\n\n---\n\n')}\n\n请输出完整的结构化分析。`;
+  const ctx = marketContext ? `\n\n---\n\n${marketContext}` : '';
+  const user = `当前时间: ${nowIso}\n\n${sources.map((s) => s.text).join('\n\n---\n\n')}${ctx}\n\n请输出完整的结构化分析。`;
   const r = await generate(env, {
     chain: chainFor(env, task),
     purpose: 'analysis',

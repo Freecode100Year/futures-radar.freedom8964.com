@@ -262,7 +262,7 @@ function renderDetail(d) {
 // ---------- 市场实际反应 ----------
 
 const SERIES = ['#3987e5', '#d95926', '#199e70']; // 已用校验脚本验证（深色背景）
-const VERDICT = { hit: ['✓ 命中', 'ok'], miss: ['✗ 相反', 'bad'], insignificant: ['— 不显著', 'note'], unscored: ['未评', 'note'] };
+const VERDICT = { hit: ['✓ 命中', 'ok'], miss: ['✗ 相反', 'bad'], insignificant: ['— 不显著', 'note'], unscored: ['未评', 'note'], demoted: ['降为不确定', 'note'] };
 const STATUS = { insufficient_history: '历史数据不足', zero_volatility: '无波动', waiting: '等待开盘' };
 
 function fmtChange(kind, c) {
@@ -391,7 +391,7 @@ async function showCalibration() {
   const olTrack = await outlookTrackHtml().catch(() => '');
   $('#detail').innerHTML = `<div class="d-head"><div><h2>模型校准统计</h2><div class="meta">基于 ${c.events} 个有行情数据的事件</div></div></div>
     <div class="tiles">
-      <div class="tile"><span>方向命中率</span><b>${pct(c.direction.hit_rate)}</b><em>命中 ${c.direction.hits} · 相反 ${c.direction.misses} · 不显著 ${c.direction.insignificant}</em></div>
+      <div class="tile"><span>方向命中率</span><b>${pct(c.direction.hit_rate)}</b><em>命中 ${c.direction.hits} · 相反 ${c.direction.misses} · 不显著 ${c.direction.insignificant}${c.direction.demoted ? ` · 因战绩差降为不确定 ${c.direction.demoted}` : ''}</em></div>
       <div class="tile"><span>市场冲击偏差</span><b>${c.market_shock.bias ?? '—'}</b><em>模型分 − 实测分；负数＝模型低估</em></div>
       <div class="tile"><span>平均绝对误差</span><b>${c.market_shock.mae ?? '—'}</b><em>${c.market_shock.n} 个事件，0–5 分制</em></div>
     </div>

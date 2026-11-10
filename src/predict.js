@@ -24,7 +24,7 @@ const sigmoid = (z) => 1 / (1 + Math.exp(-z));
 const round = (v, d = 4) => (Number.isFinite(v) ? Math.round(v * 10 ** d) / 10 ** d : null);
 
 /** 由完整小时K线（时间戳在整点/半点）构造连续的小时序列与各时段波动 */
-function prepare(rows) {
+function prepare(rows, peers = []) {
   const bars = rows.filter((r) => r.ts % 1800 === 0 && r.close > 0).sort((a, b) => a.ts - b.ts);
   // ret[i] = 第 i 根相对前一根K线。跨过每日休市（CME 17:00–18:00、谷物午盘后）仍算连续；隔了 8 小时以上（周末、节假日）就断开
   const ret = new Array(bars.length).fill(null);
@@ -39,7 +39,17 @@ function prepare(rows) {
     return Math.sqrt((xs.length * v + 10 * rmsAll * rmsAll) / (xs.length + 10));
   });
   const drift = byH.map((xs, h) => (xs.length ? (xs.reduce((a, r) => a + r, 0) / xs.length) * (xs.length / (xs.length + 30)) / sig[h] : 0));
-  return { bars, ret, sig, drift };
+  return { bars, ret, sig, drift, peers: peers.map(peerSeries) };
+}
+
+/** 相关品种：每根小时K线的标准化收益（按时间戳查），没有数据的时刻当作 0 */
+function peerSeries(rows) {
+  const bars = (rows || []).filter((r) => r.ts % 1800 === 0 && r.close > 0).sort((a, b) => a.ts - b.ts);
+  const ret = new Map();
+  for (let i = 1; i < bars.length; i++) if (bars[i].ts - bars[i - 1].ts <= 8 * HOUR) ret.set(bars[i].ts, Math.log(bars[i].close / bars[i - 1].close));
+  const xs = [...ret.values()];
+  const rms = xs.length ? Math.sqrt(xs.reduce((a, r) => a + r * r, 0) / xs.length) || 1e-6 : 1e-6;
+  return { z: (ts) => (ret.has(ts) ? ret.get(ts) / rms : 0) };
 }
 
 /**
@@ -55,8 +65,14 @@ function featuresAt(p, i, targetH) {
   };
   const ma = p.bars.slice(i - 19, i + 1).reduce((a, b) => a + b.close, 0) / 20;
   const f = { r1: (p.ret[i] ?? 0) / s, r3: sum(3), r6: sum(6), r24: sum(24), dev: Math.log(p.bars[i].close / ma) / (s * Math.sqrt(10)), tod: p.drift[targetH] * 10 };
+  // 相关品种最近 1 / 3 小时的标准化涨跌（联动、领先滞后）
+  const t = p.bars[i].ts;
+  p.peers.forEach((q, j) => {
+    f[`p${j}_1`] = q.z(t);
+    f[`p${j}_3`] = (q.z(t) + q.z(t - HOUR) + q.z(t - 2 * HOUR)) / Math.sqrt(3);
+  });
   // 截尾，避免个别极端K线主导拟合
-  for (const k of FEATURES) f[k] = Math.max(-4, Math.min(4, f[k]));
+  for (const k of Object.keys(f)) f[k] = Math.max(-4, Math.min(4, f[k]));
   return f;
 }
 
@@ -102,37 +118,62 @@ function solve(A, b) {
   return M.map((row, i) => row[n] / (row[i] || 1e-12));
 }
 
-/**
- * 预测下一小时方向。rows 只能包含预测时刻之前已知的数据。
- * @param {number} targetStart 目标窗口开始时间（unix 秒）
- * @returns {{ p_up, naive_dir, features, weights, samples } | null}
- */
-export function predictDirection(rows, targetStart) {
-  const p = prepare(rows);
+/** 训练：用已收盘的小时K线拟合岭回归逻辑回归。返回 null 表示样本不足 */
+export function fitDirectionModel(rows, { lambda = LAMBDA, peers = [] } = {}) {
+  const p = prepare(rows, peers);
   if (!p) return null;
+  const names = featureNames(peers.length);
   const X = [], y = [];
   for (let i = 24; i < p.bars.length - 1; i++) {
     if (p.ret[i + 1] === null || p.ret[i + 1] === 0) continue;
     const f = featuresAt(p, i, etHour(p.bars[i + 1].ts));
     if (!f) continue;
-    X.push(FEATURES.map((k) => f[k]));
+    X.push(names.map((k) => f[k]));
     y.push(p.ret[i + 1] > 0 ? 1 : 0);
   }
   if (X.length < MIN_SAMPLES) return null;
-  const w = fitLogistic(X, y);
+  return { w: fitLogistic(X, y, lambda), samples: X.length, names, peers: peers.length };
+}
+
+const featureNames = (nPeers) => [...FEATURES, ...Array.from({ length: nPeers }, (_, j) => [`p${j}_1`, `p${j}_3`]).flat()];
+
+/** 预测：用训练好的模型，算最新一根K线之后、目标时段的上涨概率 */
+export function applyDirectionModel(rows, targetStart, model, { peers = [] } = {}) {
+  if (!model) return null;
+  const p = prepare(rows, peers.slice(0, model.peers || 0));
+  if (!p) return null;
+  const { w } = model;
+  const names = model.names || FEATURES;
   const last = p.bars.length - 1;
   const f = featuresAt(p, last, etHour(targetStart));
   if (!f) return null;
-  const z = w[0] + FEATURES.reduce((a, k, j) => a + w[j + 1] * f[k], 0);
+  const z = w[0] + names.reduce((a, k, j) => a + w[j + 1] * (f[k] ?? 0), 0);
   const lastRet = p.ret[last];
   return {
     p_up: round(sigmoid(z), 4),
     naive_dir: lastRet > 0 ? 1 : lastRet < 0 ? -1 : 0, // 对照基准：照抄最近一小时的方向
-    features: Object.fromEntries(FEATURES.map((k) => [k, round(f[k], 3)])),
-    weights: Object.fromEntries(['bias', ...FEATURES].map((k, j) => [k, round(w[j], 4)])),
-    samples: X.length,
+    features: Object.fromEntries(names.map((k) => [k, round(f[k], 3)])),
+    weights: Object.fromEntries(['bias', ...names].map((k, j) => [k, round(w[j], 4)])),
+    samples: model.samples,
   };
 }
+
+/**
+ * 预测下一小时方向。rows 只能包含预测时刻之前已知的数据。
+ * @param {number} targetStart 目标窗口开始时间（unix 秒）
+ * @returns {{ p_up, naive_dir, features, weights, samples } | null}
+ */
+export function predictDirection(rows, targetStart, opts = {}) {
+  return applyDirectionModel(rows, targetStart, fitDirectionModel(rows, opts), opts);
+}
+
+/** 各品种的相关品种（第 3 步联动特征用；回测确认有用的品种才在线上启用） */
+export const PEERS = {
+  wti: ['brent', 'es'], brent: ['wti', 'es'], natgas: ['wti'],
+  gold: ['silver', 'zn'], silver: ['gold', 'copper'], copper: ['es', 'silver'],
+  soybeans: ['corn'], corn: ['soybeans', 'wheat'], wheat: ['corn'],
+  es: ['nq', 'zn'], nq: ['es', 'zn'], zn: ['es'],
+};
 
 /** 文字描述：只说"概率"，不说买卖 */
 export function directionLabel(pUp) {
@@ -151,3 +192,25 @@ export function actualDirection(base, actual, sigmaPct) {
 }
 
 export const NO_CALL = 0.02; // |P − 50%| 小于 2 个百分点视为"不表态"，不计入命中率
+
+/**
+ * 概率校准：模型报 55% 时实际只有 52% 会涨，就照实报 52%。
+ * 用该品种最近已核对的（原始概率, 实际涨跌）拟合一个收缩系数 c，使 Brier 分数最小：
+ *   校准后 = 50% + c × (原始 − 50%)，c ∈ [0, 1.5]。样本少时 c 向 1（不改动）收缩。
+ * hist: [{ p: 原始概率, y: 1 涨 / 0 跌 }]（持平的窗口不放进来）
+ */
+export const CALIB_WINDOW = 1000;
+export function calibrationFactor(hist) {
+  const xs = hist.slice(-CALIB_WINDOW).filter((h) => Number.isFinite(h.p) && (h.y === 0 || h.y === 1));
+  let num = 0, den = 0;
+  for (const h of xs) { num += (h.p - 0.5) * (h.y - 0.5); den += (h.p - 0.5) ** 2; }
+  if (xs.length < 50 || den <= 0) return 1;
+  const raw = Math.min(1.5, Math.max(0, num / den));
+  const w = xs.length / (xs.length + 200);
+  return w * raw + (1 - w) * 1;
+}
+export function calibrateProb(p, hist) {
+  if (p === null || p === undefined) return p;
+  const c = calibrationFactor(hist);
+  return Math.round(Math.min(0.75, Math.max(0.25, 0.5 + c * (p - 0.5))) * 10000) / 10000;
+}
